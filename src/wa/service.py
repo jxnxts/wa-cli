@@ -6,6 +6,11 @@ environment variable (never on the command line, never in a file). All GoWA
 settings live in the script generated here: 127.0.0.1 only, no read receipts,
 no auto-reply, no call rejection, no Chatwoot, no webhook, no web dashboard,
 no GoWA MCP, no media download and no periodic "online" presence.
+
+launchd starts agents with a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin), where GoWA
+cannot find the ffmpeg it needs for videos and voice notes. The plist sets PATH to the
+folder of the ffmpeg found now (if any), Homebrew's folders and the system ones. It is
+the only variable in the plist, and it holds no secret.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from __future__ import annotations
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -81,10 +87,26 @@ def render_run_script(data: Path, port: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_plist(data: Path) -> bytes:
+SERVICE_PATH_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def service_path(env: Mapping[str, str] | None = None, which: Callable[..., str | None] = shutil.which) -> str:
+    """PATH for the LaunchAgent: the detected ffmpeg's folder first, then Homebrew and the system."""
+    env = os.environ if env is None else env
+    search = os.pathsep.join([env.get("PATH", ""), *SERVICE_PATH_DIRS])
+    dirs: list[str] = []
+    ffmpeg = which("ffmpeg", path=search)
+    if ffmpeg:
+        dirs.append(str(Path(ffmpeg).parent))  # not resolved: a Homebrew Cellar path changes on upgrade
+    dirs += SERVICE_PATH_DIRS
+    return os.pathsep.join(dict.fromkeys(dirs))
+
+
+def render_plist(data: Path, path: str | None = None) -> bytes:
     logs = data / "logs"
     return plistlib.dumps(
         {
+            "EnvironmentVariables": {"PATH": path or service_path()},
             "Label": comp.LAUNCH_LABEL,
             "ProgramArguments": ["/bin/sh", str(data / "bin" / "gowa-run.sh")],
             "WorkingDirectory": str(data),
@@ -130,7 +152,7 @@ def install(env: Mapping[str, str] | None = None, runner: Runner = subprocess.ru
     os.chmod(script, 0o700)
     plist = comp.plist_path()
     plist.parent.mkdir(parents=True, exist_ok=True)
-    plist.write_bytes(render_plist(data))
+    plist.write_bytes(render_plist(data, service_path(env)))
     os.chmod(plist, 0o644)
     return {"data_dir": str(data), "binary": str(gowa), "run_script": str(script), "plist": str(plist),
             "credential_created": created}
@@ -166,24 +188,84 @@ def _wait_health(client: comp.GowaClient, timeout: float, sleep, clock) -> bool:
         sleep(0.5)
 
 
+UNLOAD_TIMEOUT = 15.0  # seconds to wait for launchd to drop the old job after bootout
+BOOTSTRAP_ATTEMPTS = 5
+BOOTSTRAP_RETRY_DELAY = 1.0
+HEALTH_TIMEOUT = 20.0
+RECOVERY_ROUNDS = 2  # extra bootstraps when the job vanished instead of coming up
+
+
+def _launchctl(runner: Runner, *args: str) -> subprocess.CompletedProcess:
+    return runner(["launchctl", *args], capture_output=True, text=True, timeout=30)
+
+
+def _wait_unloaded(runner: Runner, sleep, clock, timeout: float = UNLOAD_TIMEOUT) -> bool:
+    """bootout returns before launchd has finished stopping the job: wait until it is gone."""
+    deadline = clock() + timeout
+    while loaded(runner):
+        if clock() >= deadline:
+            return False
+        sleep(0.5)
+    return True
+
+
+def _bootstrap(plist: str, runner: Runner, sleep) -> subprocess.CompletedProcess:
+    """bootstrap fails (often "5: Input/output error") while the old job is still going away: retry."""
+    proc = None
+    for attempt in range(BOOTSTRAP_ATTEMPTS):
+        if attempt:
+            sleep(BOOTSTRAP_RETRY_DELAY)
+        proc = _launchctl(runner, "bootstrap", _domain(), plist)
+        if proc.returncode == 0 or loaded(runner):
+            return subprocess.CompletedProcess(proc.args, 0, proc.stdout, proc.stderr)
+    return proc
+
+
 def start(env: Mapping[str, str] | None = None, runner: Runner = subprocess.run,
           client: comp.GowaClient | None = None, sleep=time.sleep, clock=time.monotonic) -> dict:
     env = os.environ if env is None else env
+    try:
+        before = comp.plist_path().read_bytes()
+    except OSError:
+        before = None
     info = install(env, runner)
-    if loaded(runner):
-        proc = runner(["launchctl", "kickstart", "-k", f"{_domain()}/{comp.LAUNCH_LABEL}"],
-                      capture_output=True, text=True, timeout=30)
+    changed = before != comp.plist_path().read_bytes()
+    is_loaded = loaded(runner)
+    attempts = 0
+    if is_loaded and changed:
+        # kickstart keeps the plist launchd loaded before (its PATH, for one): reload it,
+        # waiting for the old job to be gone before loading the new one.
+        _launchctl(runner, "bootout", f"{_domain()}/{comp.LAUNCH_LABEL}")
+        if not _wait_unloaded(runner, sleep, clock):
+            raise ServiceError(f"launchd did not stop the old service within {int(UNLOAD_TIMEOUT)} s; "
+                               "run `wa companion service start` again.")
+        proc = _bootstrap(info["plist"], runner, sleep)
+        action = "reloaded"
+    elif is_loaded:
+        proc = _launchctl(runner, "kickstart", "-k", f"{_domain()}/{comp.LAUNCH_LABEL}")
         action = "restarted"
     else:
-        proc = runner(["launchctl", "bootstrap", _domain(), info["plist"]], capture_output=True, text=True, timeout=30)
+        proc = _bootstrap(info["plist"], runner, sleep)
         action = "loaded"
+    attempts += 1
     if proc.returncode != 0:
         raise ServiceError("launchctl failed to start the service.", stderr=(proc.stderr or "").strip()[:300])
     client = client or comp.default_client(env, runner)
-    healthy = _wait_health(client, 20.0, sleep, clock)
-    out = {"started": healthy, "action": action, **info, **status(env, runner, client)}
-    if not healthy:
-        out["note"] = f"The service did not respond within 20 s. See {comp.data_dir(env) / 'logs' / 'gowa.err.log'}."
+    healthy = _wait_health(client, HEALTH_TIMEOUT, sleep, clock)
+    # The job can vanish right after a reload (GoWA logs "Received terminated"): load it again.
+    for _ in range(RECOVERY_ROUNDS):
+        if healthy or loaded(runner):
+            break
+        proc = _bootstrap(info["plist"], runner, sleep)
+        attempts += 1
+        if proc.returncode == 0:
+            healthy = _wait_health(client, HEALTH_TIMEOUT, sleep, clock)
+    st = status(env, runner, client)
+    started = bool(healthy and st.get("loaded"))
+    out = {**info, **st, "started": started, "action": action, "attempts": attempts}
+    if not started:
+        out["note"] = (f"The service is not up after {attempts} attempt(s). "
+                       f"See {comp.data_dir(env) / 'logs' / 'gowa.err.log'}.")
     return out
 
 
