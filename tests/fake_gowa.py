@@ -49,6 +49,8 @@ class FakeGowa:
         self.list_echo = True  # False: GoWA accepts the patch but the echo never arrives
         self.lists_synced_at: str | None = "2026-11-26T12:00:00Z"
         self.fail: dict[str, tuple[int, dict]] = {}  # caminho -> (status, corpo)
+        # jids WhatsApp does not know for a person: GoWA answers 500 "no LID found" for them.
+        self.unknown_jids: set[str] = set()
         # Media: limits in /app/info, files GoWA can download (stanza id -> (chat jid, file name, bytes)).
         self.app_info = {"version": "test", "max_file_size": 50_000_000, "max_video_size": 100_000_000,
                          "max_image_size": 20_000_000}
@@ -114,6 +116,11 @@ class FakeGowa:
         h._send(200, {"code": "SUCCESS", "message": message, "results": results})
 
     def route(self, h, method, path, call):
+        target = ((call.get("body") or {}).get("phone") or (call.get("form") or {}).get("phone")
+                  or (path.split("/")[2] if path.startswith("/chat/") else None))
+        if method == "POST" and target in self.unknown_jids:
+            return h._send(500, {"code": "INTERNAL_SERVER_ERROR",
+                                 "message": f"recipient is not on WhatsApp: no LID found for {target}"})
         if path == "/devices/wa-mac" and method == "GET":
             if not self.device:
                 # the real GoWA answers 500 with this message

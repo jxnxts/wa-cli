@@ -242,6 +242,7 @@ class WhatsApp:
                         "phone": f"+{digits}" if digits else None,
                         "jid": wa_jid or (f"{digits}@s.whatsapp.net" if digits else None),
                         "lid": lid,
+                        "wa_id": wa_jid,
                     }
                 )
                 for j in (wa_jid, lid):
@@ -309,6 +310,32 @@ class WhatsApp:
         for d in br_variants(digits):
             out.append(f"{d}@s.whatsapp.net")
             out.extend(sorted(self._lids_by_phone.get(d, ())))
+        return list(dict.fromkeys(out))
+
+    def send_jids_for_phone(self, digits: str) -> list[str]:
+        """JIDs to address a person by, best first, for clients (GoWA) that need the jid WhatsApp
+        knows: the jid of an existing one-to-one chat (often an @lid), then the contact's own
+        WhatsApp id (ZWHATSAPPID, which can be the old Brazilian number without the ninth digit),
+        then the number itself with and without the ninth digit."""
+        digits = phone_digits(digits)
+        if not digits:
+            return []
+        self._load_contacts()
+        known = self.jids_for_phone(digits)
+        where, params = self._chat_filter("s", (0,))
+        rows = db.query(
+            self.conn,
+            f"SELECT s.ZCONTACTJID AS jid FROM ZWACHATSESSION s WHERE {where} "
+            f"AND s.ZCONTACTJID IN ({','.join('?' * len(known))}) "
+            "ORDER BY (s.ZCONTACTJID LIKE '%@lid') DESC, s.ZLASTMESSAGEDATE DESC",
+            [*params, *known],
+        )
+        out = [r["jid"] for r in rows if r["jid"]]
+        variants = br_variants(digits)
+        for c in self._contacts:
+            if c.get("wa_id") and c["phone"] and phone_digits(c["phone"]) in variants:
+                out.append(c["wa_id"])
+        out += [f"{d}@s.whatsapp.net" for d in variants]
         return list(dict.fromkeys(out))
 
     # ------------------------------------------------------------ filters

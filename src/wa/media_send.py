@@ -234,7 +234,7 @@ def send_media(
                                limit_bytes=limit, size_bytes=len(data))
 
         route, field_name = ROUTES[kind]
-        form: dict = {"phone": target["jid"]}
+        form: dict = {}
         if caption:
             form["caption"] = caption
         if reply_to:
@@ -244,8 +244,9 @@ def send_media(
         stamp = clock()
         usage = comp.reserve_send(env, stamp)
         try:
-            res = client.results("POST", route, form=form, upload=(field_name, upload_name, upload_mime, data),
-                                 timeout=300) or {}
+            res = comp.send_to_target(target, lambda jid: client.results(
+                "POST", route, form={"phone": jid, **form}, upload=(field_name, upload_name, upload_mime, data),
+                timeout=300)) or {}
         except comp.CompanionUnavailable as exc:
             raise comp.CompanionUnavailable(
                 "GoWA did not answer the send. The file MAY have gone out: check the phone before retrying.",
@@ -261,4 +262,4 @@ def send_media(
     return {"sent": True, "mode": "sent", "via": "companion", "via_requested": via, "to": target,
             "file": {**file_info, "uploaded_bytes": len(data)}, "caption": caption,
             "reply_to": form.get("reply_message_id"),
-            "confirmation": {"message_id": message_id, "by": "gowa"}, "rate": usage}
+            "confirmation": {"message_id": message_id, "by": "gowa", "jid": target["jid"]}, "rate": usage}

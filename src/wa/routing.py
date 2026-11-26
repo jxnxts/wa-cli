@@ -51,6 +51,8 @@ def _desktop_check(wa: WhatsApp, target: dict, text: str, started: float, env: M
         return "skipped"
     wait = min(wait, 10.0)
     try:
+        if not target.get("phone"):
+            return "skipped"
         jids = [target["jid"], *wa.jids_for_phone(phone_digits(target["phone"]))]
         since = started - APPLE_EPOCH_OFFSET - 2
         deadline = clock() + wait
@@ -160,7 +162,7 @@ def chat_action(
                    "plan": [f"POST /chat/{target['jid']}/{route} {body} on GoWA (app state, syncs with the phone)"],
                    "allowed_by_env": actions_allowed(env),
                    "hint": "Nothing was done. To run it: --confirm (MCP: confirm=true) with WA_ALLOW_ACTIONS=1."}
-            if target["kind"] == "person":
+            if target["kind"] == "person" and target.get("phone"):
                 try:
                     out["state_before"] = wa.chat_state([target["jid"], *wa.jids_for_phone(phone_digits(target["phone"]))])
                 except WAError:

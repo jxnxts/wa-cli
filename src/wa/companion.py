@@ -507,7 +507,15 @@ def release_send(env: Mapping[str, str], stamp: float) -> None:
 
 
 def resolve_target(wa: WhatsApp, to: str, allow_groups: bool = True) -> dict:
-    """A person (phone number, jid or name, through the Desktop resolver) or a group by jid."""
+    """A person (phone number, jid or name) or a group by jid, with the jids to try on GoWA.
+
+    GoWA needs the jid WhatsApp knows for that person, which is not always the number in the
+    address book: a chat can be an @lid, and an old Brazilian number lives without the ninth
+    digit. So `jid` is, in order: the jid you passed (an @lid or @s.whatsapp.net is used as
+    given), the jid of the existing chat, the contact's ZWHATSAPPID, and the number itself.
+    `candidates` lists them all; send_to_target() moves to the next one when GoWA says the
+    recipient is not on WhatsApp.
+    """
     t = (to or "").strip()
     if not t:
         raise InvalidArgument("give the recipient")
@@ -521,11 +529,71 @@ def resolve_target(wa: WhatsApp, to: str, allow_groups: bool = True) -> dict:
             name = wa._chat_dict(wa.resolve_chat(t)).get("name")
         except WAError:
             pass
-        return {"kind": "group", "jid": t, "name": name}
+        return {"kind": "group", "jid": t, "name": name, "candidates": [t]}
     if t.endswith("@broadcast") or t.endswith("@newsletter"):
         raise InvalidArgument("broadcast lists, status and channels are not supported")
-    rec = wa.resolve_recipient(t)
-    return {"kind": "person", **rec}
+    cands: list[str] = []
+    if "@" in t:
+        if not (t.endswith("@s.whatsapp.net") or t.endswith("@lid")):
+            raise InvalidArgument("invalid recipient: use a phone number, @s.whatsapp.net, @lid (person) or @g.us (group)")
+        cands.append(t)  # exactly what was asked for
+        try:
+            rec = wa.resolve_recipient(t)
+        except NotFoundError:  # an @lid whose number this Mac does not know: still usable as is
+            name = wa.contact_name(t)
+            if not name:
+                try:
+                    name = wa._chat_dict(wa.resolve_chat(t)).get("name")
+                except WAError:
+                    pass
+            rec = {"name": name, "jid": t, "phone": None}
+    else:
+        rec = wa.resolve_recipient(t)
+        if not looks_like_phone(t):  # a name: the chat with that name, if it is a one-to-one chat
+            try:
+                row = wa.resolve_chat(t)
+                if row["ZSESSIONTYPE"] == 0 and row["ZCONTACTJID"]:
+                    cands.append(row["ZCONTACTJID"])
+            except WAError:
+                pass
+    if rec.get("phone"):
+        cands += wa.send_jids_for_phone(phone_digits(rec["phone"]))
+    cands = list(dict.fromkeys(c for c in cands if c))
+    return {"kind": "person", "name": rec.get("name"), "phone": rec.get("phone"), "jid": cands[0],
+            "candidates": cands}
+
+
+_NOT_ON_WHATSAPP = ("no lid found", "not on whatsapp")
+
+
+def recipient_unknown(exc: WAError) -> bool:
+    """GoWA's answer when that jid is not the one WhatsApp knows for the person."""
+    return isinstance(exc, CompanionFailed) and any(k in exc.message.lower() for k in _NOT_ON_WHATSAPP)
+
+
+def send_to_target(target: dict, call: Callable[[str], Any]) -> Any:
+    """Run call(jid) with the target's jids in order until GoWA accepts one.
+
+    Only "not on WhatsApp / no LID found" moves on to the next jid; any other error stops.
+    The jid used goes to target["jid"] and the refused ones to target["jids_refused"].
+    """
+    refused: list[dict] = []
+    cands = target.get("candidates") or [target["jid"]]
+    for i, jid in enumerate(cands):
+        try:
+            res = call(jid)
+        except WAError as exc:
+            if recipient_unknown(exc) and i + 1 < len(cands):
+                refused.append({"jid": jid, "error": exc.message})
+                continue
+            if refused:
+                exc.details["jids_refused"] = refused + [{"jid": jid, "error": exc.message}]
+            raise
+        target["jid"] = jid
+        if refused:
+            target["jids_refused"] = refused
+        return res
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 # ------------------------------------------------------------ sending
@@ -545,11 +613,12 @@ def send(
     target = resolve_target(wa, to)
     stamp = clock()
     usage = reserve_send(env, stamp)
-    body: dict = {"phone": target["jid"], "message": text}
+    body: dict = {"message": text}
     if reply_to:
         body["reply_message_id"] = str(reply_to).strip()
     try:
-        res = client.results("POST", "/send/message", body=body, timeout=60) or {}
+        res = send_to_target(target, lambda jid: client.results(
+            "POST", "/send/message", body={"phone": jid, **body}, timeout=60)) or {}
     except CompanionUnavailable as exc:
         # Without an answer there is no way to know whether it went out: count it and warn.
         raise CompanionUnavailable(
@@ -571,7 +640,7 @@ def send(
         "via": "companion",
         "to": target,
         "reply_to": body.get("reply_message_id"),
-        "confirmation": {"message_id": message_id, "by": "gowa"},
+        "confirmation": {"message_id": message_id, "by": "gowa", "jid": target["jid"]},
         "rate": usage,
     }
 
@@ -584,9 +653,10 @@ def chat_action(client: GowaClient, wa: WhatsApp, to: str, action: str) -> dict:
         raise InvalidArgument(f"invalid action: {action!r} (use {', '.join(COMPANION_ACTIONS)})")
     route, body = COMPANION_ACTIONS[action]
     target = resolve_target(wa, to)
-    res = client.results("POST", f"/chat/{quote(target['jid'], safe='@.')}/{route}", body=body) or {}
+    res = send_to_target(target, lambda jid: client.results(
+        "POST", f"/chat/{quote(jid, safe='@.')}/{route}", body=body)) or {}
     return {"done": True, "mode": "executed", "via": "companion", "action": action, "to": target,
-            "confirmation": {"by": "gowa_app_state", "gowa": res}}
+            "confirmation": {"by": "gowa_app_state", "jid": target["jid"], "gowa": res}}
 
 
 # ------------------------------------------------------------ chat lists (labels)
@@ -704,7 +774,7 @@ def list_plan(op: str, **fields) -> dict:
 
 
 def _member_keys(wa: WhatsApp, target: dict) -> set[str]:
-    keys = {target["jid"]}
+    keys = {target["jid"], *(target.get("candidates") or [])}
     if target.get("kind") == "person" and target.get("phone"):
         keys.update(wa.jids_for_phone(phone_digits(target["phone"])))
     return keys
@@ -754,8 +824,8 @@ def list_member(client: GowaClient, wa: WhatsApp, list_ref: str, chat: str, add:
                 sleep=time.sleep, clock=time.time) -> dict:
     item = resolve_list(wa, list_ref, client)
     target = resolve_target(wa, chat)
-    res = client.results("POST", f"/chat/{quote(target['jid'], safe='@.')}/label",
-                         body={"label_id": str(item["id"]), "labeled": add}) or {}
+    res = send_to_target(target, lambda jid: client.results(
+        "POST", f"/chat/{quote(jid, safe='@.')}/label", body={"label_id": str(item["id"]), "labeled": add})) or {}
     keys = _member_keys(wa, target)
 
     def check(items: list[dict]) -> bool:

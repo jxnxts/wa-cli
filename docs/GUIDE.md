@@ -135,6 +135,8 @@ wa send --to "+1…" --text "…" --via desktop                                 
 
 The answer always names the path it used in `via` (`companion` or `desktop`). Text can be up to 4096 characters on the CLI and 2000 in MCP.
 
+Through the companion, a person is addressed by the jid WhatsApp knows, which is not always the number in the address book. A jid you pass (`…@lid` or `…@s.whatsapp.net`) is used as given. For a number or a name, `wa` uses the jid of the existing chat (often an `@lid`), then the contact's WhatsApp id (which can be an old Brazilian number without the ninth digit), then the number with and without the ninth digit. If GoWA answers that the recipient is not on WhatsApp (`no LID found`), `wa` tries the next one. `to.jid` and `confirmation.jid` in the answer show the jid used, `to.candidates` the order, and `to.jids_refused` the ones GoWA refused.
+
 How a real send through the app UI (`--method ui`, the default) works:
 
 1. It checks that the Mac screen is unlocked (`ioreg`). If it is locked, it stops with `screen_locked`.
