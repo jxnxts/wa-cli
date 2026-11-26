@@ -216,7 +216,7 @@ WhatsApp Desktop for Mac does not receive chat lists from the phone. Its `Labels
 - `--list` accepts the name or the id shown by `wa lists`.
 - After each operation, `wa` polls the companion's list state for up to 5 s and reports `verified: true` once the change shows up there (`verified_by: "companion"`). WhatsApp Desktop is never used to confirm a list operation.
 
-Creating a list was tested on a real account (it showed up on the phone). Adding, removing and deleting have only run against simulators.
+Creating, adding a chat, removing it and deleting a list were tested on a real account. Each returned `verified: true`, and the list and the chat showed up on the phone.
 
 ### Calls
 
@@ -274,7 +274,7 @@ Flow:
 
 The Mac becomes one more device under *Linked devices*, named `wa-mac`. GoWA, a WhatsApp Web client written in Go, makes the link. It is built from the public fork [jxnxts/go-whatsapp-web-multidevice](https://github.com/jxnxts/go-whatsapp-web-multidevice) (branch `wa-companion`).
 
-**Status.** Pairing, status, creating a list and these chat actions were tested on a real account: archive, unarchive, pin, mute, unmute and mark unread. Unpin through the companion was accepted by GoWA, but WhatsApp Desktop kept the chat pinned, so it is not confirmed yet. Sending, the inbox and adding, removing and deleting lists only went through simulated tests. Treat them as experimental.
+**Status.** Pairing, status, chat lists (create, add, remove, delete) and these chat actions were tested on a real account: archive, unarchive, pin, mute, unmute and mark unread. Unpin through the companion was accepted by GoWA, but WhatsApp Desktop kept the chat pinned, so it is not confirmed yet. Sending and the inbox only went through simulated tests. Treat them as experimental.
 
 ### Risks
 
@@ -430,7 +430,7 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 - Chats with **Advanced Chat Privacy** are **not** filtered when reading yet (the flag in the database has not been identified).
 - Calling, hanging up, muting and the voice agent have not been tested on a real account yet.
 - The English menu titles come from the localization files (`en.lproj` in WhatsApp.app and in its SharedModules framework) and have not been tested on a real account. Other UI languages are not supported for desktop actions yet.
-- WhatsApp Desktop for Mac does not show chat lists. They only exist through the companion. Adding, removing and deleting lists and the "unavailable" presence have **not** been tested on a real account yet. Through the app UI, creating or moving lists does not exist (there is no menu for it).
+- WhatsApp Desktop for Mac does not show chat lists. They only exist through the companion. The "unavailable" presence has **not** been tested on a real account yet. Through the app UI, creating or moving lists does not exist (there is no menu for it).
 - Unpin through the companion is not confirmed. GoWA accepted it, but WhatsApp Desktop kept the chat pinned in the real test.
 - Groups accept sending through the app or the companion (by jid). Chat actions on a group only work through the companion.
 - Through the app UI, WhatsApp comes to the front for a moment for every send or action.
@@ -451,6 +451,5 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 | Companion pairing and status | tested on a real account |
 | Chat actions through the companion (archive, unarchive, pin, mute, unmute, mark unread) | tested on a real account |
 | Unpin through the companion | not confirmed (Desktop kept the chat pinned) |
-| Creating a list through the companion | tested on a real account |
-| Adding, removing and deleting lists | simulated tests only |
+| Chat lists through the companion (create, add a chat, remove it, delete) | tested on a real account |
 | Companion sending and inbox | experimental, simulated tests only |
