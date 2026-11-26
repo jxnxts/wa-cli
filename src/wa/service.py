@@ -188,6 +188,39 @@ def _wait_health(client: comp.GowaClient, timeout: float, sleep, clock) -> bool:
         sleep(0.5)
 
 
+UNLOAD_TIMEOUT = 15.0  # seconds to wait for launchd to drop the old job after bootout
+BOOTSTRAP_ATTEMPTS = 5
+BOOTSTRAP_RETRY_DELAY = 1.0
+HEALTH_TIMEOUT = 20.0
+RECOVERY_ROUNDS = 2  # extra bootstraps when the job vanished instead of coming up
+
+
+def _launchctl(runner: Runner, *args: str) -> subprocess.CompletedProcess:
+    return runner(["launchctl", *args], capture_output=True, text=True, timeout=30)
+
+
+def _wait_unloaded(runner: Runner, sleep, clock, timeout: float = UNLOAD_TIMEOUT) -> bool:
+    """bootout returns before launchd has finished stopping the job: wait until it is gone."""
+    deadline = clock() + timeout
+    while loaded(runner):
+        if clock() >= deadline:
+            return False
+        sleep(0.5)
+    return True
+
+
+def _bootstrap(plist: str, runner: Runner, sleep) -> subprocess.CompletedProcess:
+    """bootstrap fails (often "5: Input/output error") while the old job is still going away: retry."""
+    proc = None
+    for attempt in range(BOOTSTRAP_ATTEMPTS):
+        if attempt:
+            sleep(BOOTSTRAP_RETRY_DELAY)
+        proc = _launchctl(runner, "bootstrap", _domain(), plist)
+        if proc.returncode == 0 or loaded(runner):
+            return subprocess.CompletedProcess(proc.args, 0, proc.stdout, proc.stderr)
+    return proc
+
+
 def start(env: Mapping[str, str] | None = None, runner: Runner = subprocess.run,
           client: comp.GowaClient | None = None, sleep=time.sleep, clock=time.monotonic) -> dict:
     env = os.environ if env is None else env
@@ -198,25 +231,41 @@ def start(env: Mapping[str, str] | None = None, runner: Runner = subprocess.run,
     info = install(env, runner)
     changed = before != comp.plist_path().read_bytes()
     is_loaded = loaded(runner)
+    attempts = 0
     if is_loaded and changed:
-        # kickstart keeps the plist launchd loaded before (its PATH, for one): reload it.
-        runner(["launchctl", "bootout", f"{_domain()}/{comp.LAUNCH_LABEL}"], capture_output=True, text=True, timeout=30)
-        proc = runner(["launchctl", "bootstrap", _domain(), info["plist"]], capture_output=True, text=True, timeout=30)
+        # kickstart keeps the plist launchd loaded before (its PATH, for one): reload it,
+        # waiting for the old job to be gone before loading the new one.
+        _launchctl(runner, "bootout", f"{_domain()}/{comp.LAUNCH_LABEL}")
+        if not _wait_unloaded(runner, sleep, clock):
+            raise ServiceError(f"launchd did not stop the old service within {int(UNLOAD_TIMEOUT)} s; "
+                               "run `wa companion service start` again.")
+        proc = _bootstrap(info["plist"], runner, sleep)
         action = "reloaded"
     elif is_loaded:
-        proc = runner(["launchctl", "kickstart", "-k", f"{_domain()}/{comp.LAUNCH_LABEL}"],
-                      capture_output=True, text=True, timeout=30)
+        proc = _launchctl(runner, "kickstart", "-k", f"{_domain()}/{comp.LAUNCH_LABEL}")
         action = "restarted"
     else:
-        proc = runner(["launchctl", "bootstrap", _domain(), info["plist"]], capture_output=True, text=True, timeout=30)
+        proc = _bootstrap(info["plist"], runner, sleep)
         action = "loaded"
+    attempts += 1
     if proc.returncode != 0:
         raise ServiceError("launchctl failed to start the service.", stderr=(proc.stderr or "").strip()[:300])
     client = client or comp.default_client(env, runner)
-    healthy = _wait_health(client, 20.0, sleep, clock)
-    out = {"started": healthy, "action": action, **info, **status(env, runner, client)}
-    if not healthy:
-        out["note"] = f"The service did not respond within 20 s. See {comp.data_dir(env) / 'logs' / 'gowa.err.log'}."
+    healthy = _wait_health(client, HEALTH_TIMEOUT, sleep, clock)
+    # The job can vanish right after a reload (GoWA logs "Received terminated"): load it again.
+    for _ in range(RECOVERY_ROUNDS):
+        if healthy or loaded(runner):
+            break
+        proc = _bootstrap(info["plist"], runner, sleep)
+        attempts += 1
+        if proc.returncode == 0:
+            healthy = _wait_health(client, HEALTH_TIMEOUT, sleep, clock)
+    st = status(env, runner, client)
+    started = bool(healthy and st.get("loaded"))
+    out = {**info, **st, "started": started, "action": action, "attempts": attempts}
+    if not started:
+        out["note"] = (f"The service is not up after {attempts} attempt(s). "
+                       f"See {comp.data_dir(env) / 'logs' / 'gowa.err.log'}.")
     return out
 
 

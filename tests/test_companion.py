@@ -587,37 +587,120 @@ def test_service_status_parses_launchctl_and_lsof(tmp_path, gowa, monkeypatch):
     assert out["data_dir_mode"] == "0o700"
 
 
-def test_service_start_reloads_when_the_plist_changed(tmp_path, gowa, monkeypatch):
-    """kickstart keeps the old plist (and its PATH); a changed plist needs bootout + bootstrap."""
+class FakeLaunchctl:
+    """launchd as seen through launchctl: the job lingers for a while after bootout, bootstrap
+    fails with "5: Input/output error" while it does, and the job can vanish right after a
+    bootstrap (the race seen on a real Mac: GoWA logged "Received terminated" and stayed down)."""
+
+    def __init__(self, loaded=True, linger_polls=3, vanish_after_bootstrap=0, bootstrap_failures=0):
+        self.bootstrap_failures = bootstrap_failures
+        self.loaded = loaded
+        self.unloading = 0
+        self.linger_polls = linger_polls
+        self.vanish = vanish_after_bootstrap
+        self.calls: list[list[str]] = []
+        self.sec = FakeSecurity()
+        self.sec.store = SECRET
+
+    def __call__(self, cmd, **kw):
+        if cmd[0] == "security":
+            return self.sec(cmd, **kw)
+        self.calls.append(cmd[:2])
+        ok = lambda out="": subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")  # noqa: E731
+        if cmd[:2] == ["launchctl", "print"]:
+            if self.unloading:
+                self.unloading -= 1
+                return ok("\tstate = exiting\n")
+            if self.loaded:
+                return ok("\tstate = running\n\tpid = 4242\n")
+            return subprocess.CompletedProcess(cmd, 113, stdout="", stderr="Could not find service")
+        if cmd[:2] == ["launchctl", "bootout"]:
+            self.loaded = False
+            self.unloading = self.linger_polls
+            return ok()
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            if self.unloading or self.loaded or self.bootstrap_failures:
+                self.bootstrap_failures = max(0, self.bootstrap_failures - 1)
+                return subprocess.CompletedProcess(cmd, 5, stdout="", stderr="Bootstrap failed: 5: Input/output error")
+            if self.vanish:
+                self.vanish -= 1  # accepted, then gone before it could serve anything
+                return ok()
+            self.loaded = True
+            return ok()
+        if cmd[:2] == ["launchctl", "kickstart"]:
+            return ok()
+        if cmd[0] == "lsof":
+            return ok("COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"
+                      "gowa 4242 j 9u IPv4 0x1 0t0 TCP 127.0.0.1:3787 (LISTEN)\n" if self.loaded else "")
+        raise AssertionError(cmd)
+
+
+class GatedClient(comp.GowaClient):
+    """The fake GoWA answers only while the fake launchd has the job loaded."""
+
+    launchd: FakeLaunchctl = None
+
+    def health(self):
+        return bool(self.launchd.loaded and not self.launchd.unloading) and super().health()
+
+
+@pytest.fixture
+def service_env(tmp_path, monkeypatch):
     data = tmp_path / "gowa"
     monkeypatch.setenv("WA_GOWA_DIR", str(data))
     plist = tmp_path / "LaunchAgents" / "local.wa-mac.gowa.plist"
     monkeypatch.setattr(comp, "plist_path", lambda: plist)
     (data / "bin").mkdir(parents=True)
     (data / "bin" / "gowa").write_text("#!/bin/sh\n")
-    sec = FakeSecurity()
-    sec.store = SECRET
-    calls = []
-
-    def runner(cmd, **kw):
-        if cmd[0] == "security":
-            return sec(cmd, **kw)
-        calls.append(cmd[:2])
-        if cmd[:2] == ["launchctl", "print"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout="\tstate = running\n\tpid = 1\n", stderr="")
-        if cmd[0] in ("launchctl", "lsof"):
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        raise AssertionError(cmd)
-
     plist.parent.mkdir()
     plist.write_bytes(b"old plist without PATH")
-    out = service.start(runner=runner, client=comp.GowaClient(gowa.url, SECRET), sleep=lambda s: None)
-    assert out["action"] == "reloaded"
-    assert ["launchctl", "bootout"] in calls and ["launchctl", "bootstrap"] in calls
-    assert "PATH" in plistlib.loads(plist.read_bytes())["EnvironmentVariables"]
-    calls.clear()
-    out = service.start(runner=runner, client=comp.GowaClient(gowa.url, SECRET), sleep=lambda s: None)
-    assert out["action"] == "restarted" and ["launchctl", "kickstart"] in calls and ["launchctl", "bootout"] not in calls
+    return plist
+
+
+def _start(launchd, gowa):
+    client = GatedClient(gowa.url, SECRET)
+    client.launchd = launchd
+    clock = FakeClock()
+    return service.start(runner=launchd, client=client, sleep=clock.sleep, clock=clock)
+
+
+def test_service_start_waits_for_bootout_and_retries_bootstrap(service_env, gowa):
+    """kickstart keeps the old plist (and its PATH); a changed plist needs bootout + bootstrap."""
+    launchd = FakeLaunchctl(loaded=True, linger_polls=3, bootstrap_failures=2)
+    out = _start(launchd, gowa)
+    assert out["action"] == "reloaded" and out["started"] is True and out["loaded"] is True
+    assert launchd.calls.count(["launchctl", "bootstrap"]) == 3  # two "Input/output error", then loaded
+    bootout = launchd.calls.index(["launchctl", "bootout"])
+    first_bootstrap = launchd.calls.index(["launchctl", "bootstrap"])
+    # bootstrap only after launchctl print stopped showing the old job
+    assert launchd.calls[bootout + 1:first_bootstrap].count(["launchctl", "print"]) >= 4
+    assert "PATH" in plistlib.loads(service_env.read_bytes())["EnvironmentVariables"]
+
+    launchd.calls.clear()
+    out = _start(launchd, gowa)  # same plist: a plain restart
+    assert out["action"] == "restarted" and out["started"] is True
+    assert ["launchctl", "kickstart"] in launchd.calls and ["launchctl", "bootout"] not in launchd.calls
+
+
+def test_service_start_bootstraps_again_when_the_job_vanishes(service_env, gowa):
+    launchd = FakeLaunchctl(loaded=True, linger_polls=0, vanish_after_bootstrap=1)
+    out = _start(launchd, gowa)
+    assert out["started"] is True and out["attempts"] == 2
+    assert launchd.calls.count(["launchctl", "bootstrap"]) == 2
+
+
+def test_service_start_reports_failure_when_it_never_comes_up(service_env, gowa):
+    launchd = FakeLaunchctl(loaded=True, linger_polls=0, vanish_after_bootstrap=99)
+    out = _start(launchd, gowa)
+    assert out["started"] is False and out["attempts"] == 1 + service.RECOVERY_ROUNDS
+    assert "not up" in out["note"]
+
+
+def test_service_start_gives_up_when_launchd_keeps_the_old_job(service_env, gowa):
+    launchd = FakeLaunchctl(loaded=True, linger_polls=10_000)
+    with pytest.raises(service.ServiceError) as exc:
+        _start(launchd, gowa)
+    assert "did not stop" in exc.value.message and ["launchctl", "bootstrap"] not in launchd.calls
 
 
 def test_service_install_refuses_without_binary(tmp_path, monkeypatch):
