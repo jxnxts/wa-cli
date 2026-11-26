@@ -163,7 +163,9 @@ def test_send_auto_goes_companion_with_message_id(wa, client, gowa, tmp_path):
     assert out["confirmation"]["message_id"].startswith("3EB0FAKE")
     assert out["desktop_check"] == "skipped"
     sent = gowa.posts("/send/message")
-    assert sent[0]["body"] == {"phone": f"{BRUNO_PHONE}@s.whatsapp.net", "message": "Hello, Bruno"}
+    # Bruno's chat is an @lid: that is the jid WhatsApp knows, so it goes first.
+    assert sent[0]["body"] == {"phone": BRUNO_LID, "message": "Hello, Bruno"}
+    assert out["to"]["jid"] == BRUNO_LID and out["confirmation"]["jid"] == BRUNO_LID
     assert sent[0]["device"] == "wa-mac"
     assert r.calls == []
 
@@ -722,3 +724,124 @@ def test_old_gowa_without_lists_endpoint_says_rebuild(wa, client, gowa):
     with pytest.raises(comp.CompanionFailed) as exc:
         comp.lists(wa, client)
     assert "build-gowa.sh" in exc.value.message
+
+
+# ------------------------------------------------------------ which jid GoWA gets
+
+ZANON_LID = "77770000000099@lid"
+ZANON_OLD = "556181199067@s.whatsapp.net"  # ZWHATSAPPID: old Brazilian number, no ninth digit
+ZANON_NEW = "5561981199067@s.whatsapp.net"
+HAUSER_LID = "77770000000098@lid"
+
+
+@pytest.fixture
+def lid_people(data_dir):
+    """Zanon: chat @lid, address book number with the ninth digit, ZWHATSAPPID without it.
+    Hauser: chat @lid that the address book does not link to the number."""
+    c = sqlite3.connect(data_dir / "ContactsV2.sqlite")
+    c.execute("INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZFULLNAME, ZGIVENNAME, ZPHONENUMBER, ZWHATSAPPID, ZLID) "
+              "VALUES (50, 'Zanon Teste', 'Zanon', '+55 61 98119-9067', ?, ?)", (ZANON_OLD, ZANON_LID))
+    c.execute("INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZFULLNAME, ZGIVENNAME, ZPHONENUMBER, ZWHATSAPPID, ZLID) "
+              "VALUES (51, 'Hauser Teste', 'Hauser', '+55 98 98146-0020', NULL, NULL)")
+    c.commit()
+    c.close()
+    c = sqlite3.connect(data_dir / "ChatStorage.sqlite")
+    c.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZLASTMESSAGEDATE) "
+              "VALUES (50, ?, 'Zanon Teste', 0, 700000000)", (ZANON_LID,))
+    c.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZLASTMESSAGEDATE) "
+              "VALUES (51, ?, 'Hauser Teste', 0, 700000000)", (HAUSER_LID,))
+    c.commit()
+    c.close()
+    return data_dir
+
+
+def _send(wa, client, tmp_path, to):
+    return routing.send(wa, to, "oi", confirm=True, via="companion", env=_env(tmp_path, **ALLOW),
+                        client_factory=lambda: client)
+
+
+def test_explicit_lid_is_used_as_given(lid_people, client, gowa, tmp_path):
+    with WhatsApp() as w:
+        target = comp.resolve_target(w, ZANON_LID)
+        assert target["jid"] == ZANON_LID
+        assert target["candidates"][:3] == [ZANON_LID, ZANON_OLD, ZANON_NEW]
+        out = _send(w, client, tmp_path, ZANON_LID)
+    assert gowa.posts("/send/message")[0]["body"]["phone"] == ZANON_LID
+    assert out["to"]["jid"] == ZANON_LID and "jids_refused" not in out["to"]
+
+
+def test_explicit_phone_jid_is_used_as_given(lid_people, client, gowa, tmp_path):
+    with WhatsApp() as w:
+        _send(w, client, tmp_path, ZANON_OLD)
+    assert gowa.posts("/send/message")[0]["body"]["phone"] == ZANON_OLD
+
+
+def test_phone_and_name_prefer_the_chat_lid_then_the_whatsapp_id(lid_people, client, gowa, tmp_path):
+    with WhatsApp() as w:
+        by_phone = comp.resolve_target(w, "+55 61 98119-9067")
+        by_name = comp.resolve_target(w, "Zanon Teste")
+    assert by_phone["candidates"][:3] == [ZANON_LID, ZANON_OLD, ZANON_NEW]
+    assert by_name["candidates"][:3] == [ZANON_LID, ZANON_OLD, ZANON_NEW]
+    assert by_phone["jid"] == ZANON_LID
+
+
+def test_zanon_lid_refused_falls_back_to_the_old_whatsapp_id(lid_people, client, gowa, tmp_path):
+    gowa.unknown_jids = {ZANON_LID, ZANON_NEW}
+    with WhatsApp() as w:
+        out = _send(w, client, tmp_path, ZANON_LID)
+    tried = [c["body"]["phone"] for c in gowa.posts("/send/message")]
+    assert tried == [ZANON_LID, ZANON_OLD]
+    assert out["sent"] is True and out["to"]["jid"] == ZANON_OLD and out["confirmation"]["jid"] == ZANON_OLD
+    assert out["to"]["jids_refused"][0]["jid"] == ZANON_LID and "no LID found" in out["to"]["jids_refused"][0]["error"]
+    assert out["rate"]["last_minute"] == 1  # one send counted, not one per attempt
+
+
+def test_hauser_phone_without_lid_falls_back_to_the_chat_found_by_name(lid_people, client, gowa, tmp_path):
+    hauser_phone = "5598981460020@s.whatsapp.net"
+    gowa.unknown_jids = {hauser_phone, "559881460020@s.whatsapp.net"}
+    with WhatsApp() as w:
+        # by phone, the address book does not link the number to the chat: all variants are refused
+        with pytest.raises(comp.CompanionFailed) as exc:
+            _send(w, client, tmp_path, "+55 98 98146-0020")
+        assert [r["jid"] for r in exc.value.details["jids_refused"]] == [hauser_phone, "559881460020@s.whatsapp.net"]
+        # by name, the chat @lid comes first and goes through
+        out = _send(w, client, tmp_path, "Hauser Teste")
+    assert out["to"]["jid"] == HAUSER_LID and out["sent"] is True
+
+
+def test_other_gowa_errors_do_not_try_other_jids(lid_people, client, gowa, tmp_path):
+    gowa.fail["/send/message"] = (500, {"code": "INTERNAL_SERVER_ERROR", "message": "websocket not connected"})
+    with WhatsApp() as w:
+        with pytest.raises(comp.CompanionFailed):
+            _send(w, client, tmp_path, ZANON_LID)
+    assert len(gowa.posts("/send/message")) == 1
+
+
+def test_chat_action_and_media_also_fall_back(lid_people, client, gowa, tmp_path, monkeypatch):
+    gowa.unknown_jids = {ZANON_LID}
+    with WhatsApp() as w:
+        out = comp.chat_action(client, w, ZANON_LID, "archive")
+    assert out["to"]["jid"] == ZANON_OLD and [c["path"] for c in gowa.posts("/chat/")] == [
+        f"/chat/{ZANON_LID}/archive", f"/chat/{ZANON_OLD}/archive"]
+
+    from wa import media_send
+
+    outbox = media_send.ensure_outbox(_env(tmp_path))
+    (outbox / "n.txt").write_text("note")
+    with WhatsApp() as w:
+        sent = media_send.send_media(w, ZANON_LID, "n.txt", confirm=True, env=_env(tmp_path, **ALLOW),
+                                     client_factory=lambda: client)
+    assert sent["to"]["jid"] == ZANON_OLD and [c["form"]["phone"] for c in gowa.posts("/send/file")] == [
+        ZANON_LID, ZANON_OLD]
+
+
+def test_unknown_lid_without_phone_is_still_sent_as_given(data_dir, client, gowa, tmp_path):
+    lid = "12345000000001@lid"
+    c = sqlite3.connect(data_dir / "ChatStorage.sqlite")
+    c.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZLASTMESSAGEDATE) "
+              "VALUES (60, ?, 'Someone', 0, 700000000)", (lid,))
+    c.commit()
+    c.close()
+    with WhatsApp() as w:
+        out = _send(w, client, tmp_path, lid)
+    assert out["to"] == {"kind": "person", "name": "Someone", "phone": None, "jid": lid, "candidates": [lid]}
