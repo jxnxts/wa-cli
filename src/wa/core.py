@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db
+from . import db, media
 from .db import (
     APPLE_EPOCH_OFFSET,
     AmbiguousError,
@@ -177,6 +177,7 @@ class WhatsApp:
         self._phone_by_lid: dict[str, str] | None = None
         self._lids_by_phone: dict[str, set[str]] | None = None
         self._push_by_jid: dict[str, str] | None = None
+        self._media_cols: set[str] | None = None
 
     # ------------------------------------------------------------ connections
 
@@ -454,16 +455,64 @@ class WhatsApp:
 
     # ------------------------------------------------------------ messages
 
-    _MSG_SQL = (
-        "SELECT m.Z_PK AS pk, COALESCE(m.ZMESSAGEDATE, 0) AS d, m.ZTEXT AS text, "
-        "m.ZISFROMME AS me, m.ZMESSAGETYPE AS mtype, m.ZFROMJID AS fromjid, "
-        "m.ZPUSHNAME AS push, m.ZSTANZAID AS stanza, gm.ZMEMBERJID AS mjid, "
-        "gm.ZCONTACTNAME AS mname, s.ZCONTACTJID AS chatjid, s.ZPARTNERNAME AS chatname, "
-        "s.ZSESSIONTYPE AS stype "
-        "FROM ZWAMESSAGE m "
-        "JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION "
-        "LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER "
-    )
+    # ZWAMEDIAITEM column -> alias. Columns missing from this WhatsApp build read as NULL.
+    _MEDIA_COLS = {
+        "ZVCARDSTRING": "mi_mime",
+        "ZFILESIZE": "mi_size",
+        "ZMOVIEDURATION": "mi_dur",
+        "ZTITLE": "mi_title",
+        "ZAUTHORNAME": "mi_fname",
+        "ZMEDIALOCALPATH": "mi_path",
+        "ZMEDIAORIGIN": "mi_origin",
+    }
+
+    def _media_columns(self) -> set[str]:
+        if self._media_cols is None:
+            try:
+                rows = db.query(self.conn, "SELECT name FROM pragma_table_info('ZWAMEDIAITEM')")
+                self._media_cols = {r["name"] for r in rows}
+            except sqlite3.OperationalError:
+                self._media_cols = set()
+        return self._media_cols
+
+    @property
+    def _MSG_SQL(self) -> str:  # noqa: N802 (kept from when it was a constant)
+        cols = self._media_columns()
+        joinable = bool(cols)
+        media_sel = ", ".join(
+            (f"mi.{c} AS {a}" if (joinable and c in cols) else f"NULL AS {a}") for c, a in self._MEDIA_COLS.items()
+        )
+        join = "LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM " if joinable else ""
+        return (
+            "SELECT m.Z_PK AS pk, COALESCE(m.ZMESSAGEDATE, 0) AS d, m.ZTEXT AS text, "
+            "m.ZISFROMME AS me, m.ZMESSAGETYPE AS mtype, m.ZFROMJID AS fromjid, "
+            "m.ZPUSHNAME AS push, m.ZSTANZAID AS stanza, gm.ZMEMBERJID AS mjid, "
+            "gm.ZCONTACTNAME AS mname, s.ZCONTACTJID AS chatjid, s.ZPARTNERNAME AS chatname, "
+            f"s.ZSESSIONTYPE AS stype, {media_sel} "
+            "FROM ZWAMESSAGE m "
+            "JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION "
+            "LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER "
+            f"{join}"
+        )
+
+    def media_base(self) -> Path:
+        """Folder that ZMEDIALOCALPATH is relative to (`<data dir>/Message`)."""
+        return (self.base or db.data_dir()) / "Message"
+
+    def message_row(self, message_id) -> sqlite3.Row:
+        """One message by id (Z_PK), with its chat and media columns. Hidden chats follow include_hidden."""
+        try:
+            pk = int(str(message_id).strip())
+        except (TypeError, ValueError):
+            raise InvalidArgument("message id must be the number in the 'id' field of wa messages / wa search") from None
+        where, params = self._chat_filter("s", None)
+        rows = db.query(self.conn, f"{self._MSG_SQL} WHERE {where} AND m.Z_PK = ?", [*params, pk])
+        if not rows:
+            raise NotFoundError(f"message not found: {pk}")
+        return rows[0]
+
+    def message_summary(self, r: sqlite3.Row) -> dict:
+        return self._msg_dict(r, with_chat=True)
 
     def _author(self, r: sqlite3.Row) -> dict:
         if r["me"]:
@@ -498,6 +547,9 @@ class WhatsApp:
         if text is not None and len(text) > MAX_TEXT_CHARS:
             out["text"] = text[:MAX_TEXT_CHARS]
             out["text_truncated"] = True
+        info = media.describe(r, self.media_base())
+        if info:
+            out["media"] = info
         if with_chat:
             out["chat"] = {
                 "jid": r["chatjid"],
@@ -562,12 +614,15 @@ class WhatsApp:
         cursor: str | None = None,
         include_system: bool = False,
         max_chars: int | None = None,
+        media_kind: str | None = None,
     ) -> dict:
         row = self.resolve_chat(chat)
         where = "m.ZCHATSESSION = ?"
         params: list = [row["Z_PK"]]
         if not include_system:
             where += f" AND COALESCE(m.ZMESSAGETYPE, 0) != {SYSTEM_TYPE}"
+        if media_kind:
+            where += " AND " + media.filter_sql(media_kind, self._media_columns())
         dsql, dparams = self._date_filters(since, until)
         page = self._page(where + dsql, params + dparams, limit, cursor, max_chars, with_chat=False)
         return {"chat": self._chat_dict(row), **page}
@@ -585,8 +640,11 @@ class WhatsApp:
         if not text or not normalize(text).strip():
             raise InvalidArgument("give the text to search for")
         cwhere, params = self._chat_filter("s")
-        where = f"{cwhere} AND m.ZTEXT IS NOT NULL AND wa_norm(m.ZTEXT) LIKE ? ESCAPE '\\'"
-        params.append(_like_pattern(text))
+        pat = _like_pattern(text)
+        # Text, plus media captions and document file names when this build has those columns.
+        fields = ["m.ZTEXT"] + [f"mi.{c}" for c in ("ZTITLE", "ZAUTHORNAME") if c in self._media_columns()]
+        where = f"{cwhere} AND (" + " OR ".join(f"wa_norm({f}) LIKE ? ESCAPE '\\'" for f in fields) + ")"
+        params.extend([pat] * len(fields))
         chat_info = None
         if chat:
             row = self.resolve_chat(chat)

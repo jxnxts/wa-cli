@@ -192,6 +192,26 @@ class GowaHTTPError(Exception):
         self.payload = payload
 
 
+def _quote_header(value: str) -> str:
+    return value.replace("\\", "_").replace('"', "_").replace("\r", " ").replace("\n", " ")
+
+
+def multipart_body(fields: dict, field_name: str, filename: str, content_type: str, data: bytes) -> tuple[bytes, str]:
+    boundary = "----wa-mac-" + secrets.token_hex(12)
+    parts = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
+                     + str(value).encode() + b"\r\n")
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}"; filename="{_quote_header(filename)}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n".encode() + data + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
 @dataclass
 class GowaClient:
     """Minimal client for the GoWA REST API (127.0.0.1 only)."""
@@ -211,13 +231,17 @@ class GowaClient:
         return h
 
     def request(self, method: str, path: str, body: dict | None = None, query: dict | None = None,
-                device: bool = True, timeout: float | None = None) -> Any:
+                device: bool = True, timeout: float | None = None, form: dict | None = None,
+                upload: tuple[str, str, str, bytes] | None = None) -> Any:
+        """JSON body, or multipart (form fields + upload = (field, filename, content type, bytes))."""
         url = self.url + path
         if query:
             url += "?" + urlencode({k: v for k, v in query.items() if v is not None})
         data = None
         headers = self._headers(device)
-        if body is not None:
+        if upload is not None:
+            data, headers["Content-Type"] = multipart_body(form or {}, *upload)
+        elif body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
         req = urlrequest.Request(url, data=data, method=method, headers=headers)

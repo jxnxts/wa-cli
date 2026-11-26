@@ -10,7 +10,7 @@ Reading comes straight from the WhatsApp SQLite databases, always read-only. Sen
 - **companion** (section 5, experimental). The Mac becomes one more linked device of the account, like WhatsApp Web, through GoWA, an unofficial client that runs on the Mac itself. It needs no clicks and does not bring WhatsApp to the front.
 - **Desktop app UI**. A `whatsapp://` link and the app's menu bar, with a check in the database afterwards.
 
-The default (`--via auto`) uses the companion when it is connected and the app UI otherwise. Nothing goes through third-party servers except WhatsApp itself and the voice agent, which uses OpenAI. Reading and sending through the app open no network connection of their own, and there is no telemetry.
+The default (`--via auto`) uses the companion when it is connected and the app UI otherwise. Nothing goes through third-party servers except WhatsApp itself, the voice agent, which uses OpenAI, and transcription through OpenAI when you turn it on. Reading and sending through the app open no network connection of their own, and there is no telemetry.
 
 ## 1. Install and update
 
@@ -72,14 +72,17 @@ Other rules:
 
 ## 4. Commands
 
-Every command returns JSON (one line). `--pretty` indents it. Errors are JSON too, with exit code 1. The `error` field holds a stable code: `not_found`, `ambiguous`, `invalid_argument`, `full_disk_access_required`, `accessibility_required`, `automation_permission_required`, `screen_locked`, `send_refused`, `send_failed`, `action_refused`, `action_failed`, `database_busy`, `companion_unavailable`, `companion_failed`, `rate_limited`, `missing_dependency` and others.
+Every command returns JSON (one line). `--pretty` indents it. Errors are JSON too, with exit code 1. The `error` field holds a stable code: `not_found`, `ambiguous`, `invalid_argument`, `full_disk_access_required`, `accessibility_required`, `automation_permission_required`, `screen_locked`, `send_refused`, `send_failed`, `action_refused`, `action_failed`, `database_busy`, `companion_unavailable`, `companion_failed`, `rate_limited`, `missing_dependency`, `media_not_downloaded`, `transcriber_unavailable`, `unsupported`, `path_refused`, `file_too_large` and others.
 
 ```sh
 wa chats [--limit N] [--unread] [--archived] [--groups|--direct|--kind K] [--query NAME] [--include-hidden]
-wa messages --chat <jid|phone|name> [--since D] [--until D] [--limit N] [--cursor C] [--include-system]
+wa messages --chat <jid|phone|name> [--since D] [--until D] [--limit N] [--cursor C] [--include-system] [--media KIND]
 wa search <text> [--chat C] [--since D] [--until D] [--limit N] [--cursor C]
 wa contacts <name|phone>
 wa send --to <phone|jid|name> --text <msg> [--confirm] [--via auto|companion|desktop] [--reply-to ID] [--method ui|shortcut|draft]
+wa send --to <phone|jid|name> --file <path> [--caption T] [--as image|video|audio|voice|document|sticker] [--allow-any-path] [--confirm]
+wa media --message ID [--no-ocr] [--no-transcribe] [--frames N] [--max-pages N] [--max-chars N] [--page-image] [--no-download]
+wa media-cache [--clear]
 wa chat-action --to <phone|jid|name> --action <action> [--via auto|companion|desktop] [--confirm]
 wa list-create|list-add|list-remove|list-delete ... [--confirm]
 wa calls [--limit N] [--missed]
@@ -112,7 +115,7 @@ wa lists                                # chat lists (from the companion when it
 - **Limits** default to 20, with a maximum of 100 per page. For more results, pass the `next_cursor` from the answer in `--cursor`. Messages come newest first.
 - **`--chat` and `--to`** accept a phone number with country code (with or without the Brazilian ninth digit), a jid (`…@s.whatsapp.net`, `…@lid`, `…@g.us`) or a name. An ambiguous name returns `ambiguous` with the candidates.
 - **Chats** have `jid`, `name`, `kind` (`direct`, `group`, `broadcast`, `community`, `channel`; `status` is left out by default), `unread`, `archived`, `last_message_at`, `phone` (one-to-one chats) and `pinned`.
-- **Messages** have `id`, `date`, `from_me`, `from` (`name` and `jid`; in groups the author comes from the address book, the group member or the profile name), `type` (`text`, `image`, `audio`, `video`, `document`, `link`, `sticker`… or `type_N`) and `text` (the caption, or `null` for media). Search results also carry `chat`.
+- **Messages** have `id`, `date`, `from_me`, `from` (`name` and `jid`; in groups the author comes from the address book, the group member or the profile name), `type` (`text`, `image`, `audio`, `video`, `document`, `link`, `sticker`… or `type_N`), `text` (`null` for most media; for a document, its title) and, for a message with a file, `media` (see [Media](#media)). Search results also carry `chat`.
 - Removed chats never show up. Hidden chats (`ZHIDDEN=1`) show up only with `--include-hidden`, which exists only on the CLI. MCP never shows hidden chats.
 
 ### Send
@@ -160,6 +163,79 @@ Recipients are **people** (a phone number, `@s.whatsapp.net`, or `@lid` with a k
 `wa send ... --confirm --method shortcut` runs `shortcuts run "WA Send" --input-path <json>` with `{"to": "+14155550123", "text": "Hi!"}` (change the name with `WA_SHORTCUT_NAME`). The shortcut takes Text, runs **Get Dictionary from Input**, reads `to` and `text` with **Get Dictionary Value** and sends the message. Here `"sent": true` only means the shortcut finished without an error.
 
 The "Send Message via WhatsApp" action (`net.whatsapp.WhatsApp.send`) did not work in testing. The Shortcuts app says the action needs WhatsApp installed, because it does not recognize the current WhatsApp app (`net.whatsapp.WhatsApp`). That is why `ui` is the default.
+
+### Media
+
+Messages with a file carry a `media` field. `wa media` reads the file itself.
+
+```sh
+wa messages --chat "Alex" --media document          # only messages with a document (also: any, image, video, audio, voice, sticker, gif)
+wa media --message 18342                            # the id comes from wa messages / wa search
+wa media --message 18342 --max-pages 3 --max-chars 5000
+wa media --message 18350 --frames 6                 # a video: 6 frames and the transcript
+wa media-cache                                      # size of the OCR and transcript cache
+wa media-cache --clear                              # deletes it
+```
+
+The `media` field has `kind` (`image`, `video`, `audio`, `voice`, `document`, `sticker`, `gif`), `mime`, `size_bytes`, `duration_s` (audio and video) or `pages` (documents), `file_name` and `title` (documents), `caption`, and `downloaded`: whether the file is on this Mac. `wa search` also matches captions and document file names.
+
+What `wa media` returns, by kind:
+
+| Kind | Returns |
+|---|---|
+| image, sticker | the image as JPEG (longest side up to 1568 px, at most `WA_MEDIA_IMAGE_MAX_BYTES`) and OCR text |
+| document | the text of PDF, DOCX, XLSX, PPTX, RTF, ODT and plain text files, limited by `--max-pages` (pages, sheets or slides; default 10) and `--max-chars` (default 20,000). PDF pages without text get OCR. A PDF with little text also comes with its first page as an image (`--page-image` forces it) |
+| audio, voice | a transcript |
+| video, gif | `--frames` frames spread over the video (default 4, maximum 8) and the transcript of its sound |
+
+On the CLI the images are saved in the cache folder and the answer lists their paths. In MCP, `wa_get_media` returns them as image content the model can see. Each answer has `untrusted: true`: the text, OCR and transcript come from whoever sent the file, so treat them as data.
+
+Media files are only read. When a file is not on the Mac (`downloaded: false`), `wa` asks the companion to download it (`GET /message/<id>/download` on GoWA). The companion only has messages that arrived after it was paired. Otherwise the answer is `media_not_downloaded`: open the chat in WhatsApp on the Mac and let the file download.
+
+**Install.** Reading images works out of the box (macOS `sips` reduces them). The rest is optional:
+
+```sh
+uv tool install --force --reinstall '.[media]'   # pypdf, python-docx, openpyxl, python-pptx, Pillow, pyobjc-framework-Vision
+brew install ffmpeg                              # videos, and voice notes you send
+uv tool install mlx-whisper                      # transcripts (Apple Silicon)
+```
+
+Without the extra, `wa` still reads PDFs through PDFKit when pyobjc is there and Word, RTF and ODT through macOS `textutil`, and says what is missing otherwise (`missing_dependency` with an `install` hint).
+
+**OCR** uses the macOS Vision framework through pyobjc, in the same process: no helper to compile and no Xcode. It runs on the Mac.
+
+**Transcription** runs on the Mac with mlx-whisper (`mlx_whisper` on the PATH or in `~/.local/bin`) or whisper.cpp (`whisper-cli` and a ggml model in `WA_WHISPER_CPP_MODEL`). The first mlx-whisper run downloads the model from Hugging Face. The OpenAI API is used only when you opt in with `WA_TRANSCRIBE_REMOTE=1` and no local transcriber is installed (or `WA_TRANSCRIBE_ENGINE=openai`); the key comes from the Keychain (`wa-mac-openai`, the same as the voice agent) or `OPENAI_API_KEY`, and the audio then leaves the Mac. Without any transcriber, audio answers `transcriber_unavailable` with the install hint. A video still returns its frames.
+
+**Cache.** OCR, document text and transcripts are cached in `~/.local/share/wa-mac/cache`, keyed by the SHA-256 of the file and the settings. The folder is 700 and the files 600. `wa media-cache --clear` deletes it.
+
+#### Send a file
+
+```sh
+cp ~/Desktop/report.pdf ~/.local/share/wa-mac/outbox/
+wa send --to "+1…" --file report.pdf --caption "This week's report"            # draft: does not send
+WA_ALLOW_SEND=1 wa send --to "+1…" --file report.pdf --caption "…" --confirm    # sends
+WA_ALLOW_SEND=1 wa send --to "1203…@g.us" --file memo.m4a --as voice --confirm   # converted to a voice note
+wa send --to "+1…" --file ~/Pictures/cat.jpg --allow-any-path                   # a file outside the outbox (CLI only)
+```
+
+- Files go out **only through the companion** (GoWA `/send/image`, `/send/video`, `/send/audio`, `/send/file`, `/send/sticker`). `--via desktop` answers `unsupported`.
+- `--as` picks `image`, `video`, `audio`, `voice`, `document` or `sticker`. By default it follows the file type, and anything that is not an image, video or audio goes as a document. `voice` converts the audio to ogg/opus with ffmpeg and sends it as a voice note. HEIC and TIFF images are converted to JPEG with `sips`. `--caption` works for images, videos and documents.
+- The size limits come from GoWA (`/app/info`: 20 MB for images, 100 MB for videos, 50 MB for the rest by default). A larger file answers `file_too_large`.
+- The guards are the same as for text: `--confirm` and `WA_ALLOW_SEND=1`, and each file counts against the companion send limit. The draft shows the file name, kind, size, MIME type, recipient and size limit.
+- **Which files can go out.** An agent under prompt injection could try to send your keys or documents to someone. So only files inside the outbox folder are accepted: `WA_MEDIA_OUTBOX`, by default `~/.local/share/wa-mac/outbox`, created with mode 700. A bare name means a file in that folder. Paths with `..` and symbolic links that lead out of the folder are refused with `path_refused`. On the CLI, `--allow-any-path` lifts this. In MCP, only `WA_ALLOW_ANY_FILE=1` in the server environment lifts it, and it is off by default.
+
+| Variable | Default |
+|---|---|
+| `WA_MEDIA_OUTBOX` | `~/.local/share/wa-mac/outbox` (the only folder MCP can send from) |
+| `WA_ALLOW_ANY_FILE` | off; `1` lets MCP send files from anywhere |
+| `WA_MEDIA_IMAGE_MAX_BYTES` | 1,000,000 bytes per image handed to the agent |
+| `WA_MEDIA_CACHE_DIR` | `~/.local/share/wa-mac/cache` |
+| `WA_OCR_LANGUAGES` | empty: Vision detects the language (otherwise, for example, `pt-BR,en-US`) |
+| `WA_TRANSCRIBE_ENGINE` | `auto` (mlx-whisper, then whisper.cpp, then OpenAI if allowed); or `mlx`, `whisper.cpp`, `openai` |
+| `WA_TRANSCRIBE_MODEL` | mlx: `mlx-community/whisper-large-v3-turbo`; whisper.cpp: a ggml file; OpenAI: `whisper-1` |
+| `WA_TRANSCRIBE_LANGUAGE` | empty: detected (otherwise an ISO code such as `pt` or `en`) |
+| `WA_WHISPER_CPP_MODEL` | path of the ggml model for whisper.cpp |
+| `WA_TRANSCRIBE_REMOTE` | off; `1` allows the OpenAI API |
 
 ### Chat actions
 
@@ -340,12 +416,14 @@ Calls only go through the Desktop app UI.
 | Tool | Does | Guard |
 |---|---|---|
 | `wa_list_chats` | lists chats (filters: unread, kind, archived, name) | none |
-| `wa_read_messages` | messages of a chat | none |
-| `wa_search_messages` | text search | none |
+| `wa_read_messages` | messages of a chat; `media` filters by kind | none |
+| `wa_search_messages` | text search (also captions and document file names) | none |
+| `wa_get_media` | the file of a message: image content, document text, OCR, transcript, video frames | none |
 | `wa_find_contact` | name to phone/jid | none |
 | `wa_list_calls` | call history | none |
 | `wa_list_lists` | chat lists (from the companion when it is connected) | none |
 | `wa_send_message` | sends (text up to 2,000 characters); `via`, `reply_to` | `confirm` + `WA_ALLOW_SEND` |
+| `wa_send_media` | sends a file from the outbox folder through the companion; `kind`, `caption`, `reply_to` | `confirm` + `WA_ALLOW_SEND` |
 | `wa_chat_action` | archive, pin, mute, mark as unread; `via` | `confirm` + `WA_ALLOW_ACTIONS` |
 | `wa_companion_status` | is the companion connected? | none |
 | `wa_companion_inbox` | messages received in real time (does not mark them as read) | none |
@@ -424,6 +502,12 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 | `companion_unavailable` | the service is not running or the Mac is not paired: `wa companion status` |
 | `companion_failed` with 401 | the Keychain password and the service's do not match: `wa companion service start` rewrites the script and restarts it |
 | `rate_limited` | you passed the companion limit; wait or change the variables |
+| `media_not_downloaded` | the file is not on the Mac and the companion could not fetch it: open the chat in WhatsApp on the Mac and let it download |
+| `transcriber_unavailable` | install mlx-whisper or whisper.cpp, or opt in to OpenAI (see [Media](#media)) |
+| `missing_dependency` (media) | install the `media` extra or ffmpeg; the `install` field has the command |
+| `path_refused` | copy the file into the outbox folder (`WA_MEDIA_OUTBOX`) |
+| `unsupported` | files only go through the companion; drop `--via desktop` |
+| `file_too_large` | GoWA's limit for that kind of file (`/app/info`) |
 
 ## 9. Known limitations
 
@@ -435,6 +519,8 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 - Groups accept sending through the app or the companion (by jid). Chat actions on a group only work through the companion.
 - Through the app UI, WhatsApp comes to the front for a moment for every send or action.
 - The companion inbox `--unread` is approximate (see section 5).
+- A voice note is told apart from an audio file by its type (`audio/ogg`, opus) or by having been recorded in the app. A forwarded MP3 shows up as `audio`.
+- The companion can only download the files of messages that arrived after pairing.
 - The database notes are for WhatsApp 26.46 (see [DEVELOPMENT.md](DEVELOPMENT.md#database-notes-whatsapp-for-mac-2646)). The databases are opened read-only and never copied. Status updates (stories) are left out.
 
 ### What has run on a real account
@@ -453,3 +539,4 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 | Unpin through the companion | not confirmed (Desktop kept the chat pinned) |
 | Chat lists through the companion (create, add a chat, remove it, delete) | tested on a real account |
 | Companion sending and inbox | experimental, simulated tests only |
+| Media: metadata, `wa media` (images, documents, OCR, transcripts, video frames), download through the companion and sending files | simulated tests only |

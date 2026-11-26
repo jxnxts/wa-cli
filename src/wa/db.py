@@ -107,6 +107,26 @@ class MissingDependency(WAError):
     code = "missing_dependency"
 
 
+class MediaNotDownloaded(WAError):
+    code = "media_not_downloaded"
+
+
+class TranscriberUnavailable(WAError):
+    code = "transcriber_unavailable"
+
+
+class Unsupported(WAError):
+    code = "unsupported"
+
+
+class FileTooLarge(WAError):
+    code = "file_too_large"
+
+
+class PathRefused(WAError):
+    code = "path_refused"
+
+
 FDA_MESSAGE = (
     "No permission to read WhatsApp data. Grant Full Disk Access "
     "(System Settings > Privacy & Security > Full Disk Access) to the "
