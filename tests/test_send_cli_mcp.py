@@ -91,9 +91,68 @@ def test_send_validation(wa):
     with pytest.raises(InvalidArgument):
         send_message(wa, "bruno", "x" * 5000, runner=FakeRunner())
     with pytest.raises(InvalidArgument):
-        send_message(wa, GROUP_JID, "hi", runner=FakeRunner())
+        send_message(wa, "status@broadcast", "hi", runner=FakeRunner())
+    with pytest.raises(InvalidArgument):
+        send_message(wa, "120363000000000099@newsletter", "hi", runner=FakeRunner())
     with pytest.raises(InvalidArgument):
         send_message(wa, "bruno", "hi", method="sms", runner=FakeRunner())
+
+
+# ------------------------------------------------------------ groups
+
+
+def test_group_draft_without_confirm_runs_nothing(wa):
+    r = FakeRunner()
+    out = send_message(wa, GROUP_JID, "test", env={"WA_ALLOW_SEND": "1"}, runner=r)
+    assert out["sent"] is False and out["mode"] == "draft"
+    assert out["to"] == {"name": "Família", "jid": GROUP_JID, "phone": None, "kind": "group"}
+    assert out["open_url"] == f"whatsapp://openchat/{GROUP_JID}"
+    assert r.calls == []
+
+
+def test_group_draft_method_opens_chat_without_text(wa):
+    r = FakeRunner()
+    out = send_message(wa, GROUP_JID, "hi", method="draft", open_draft=True, confirm=True, env={}, runner=r)
+    assert out["sent"] is False and out["draft_opened"] is True
+    assert r.calls == [["open", f"whatsapp://openchat/{GROUP_JID}"]]
+    assert "without the text" in out["note"]
+
+
+def test_group_shortcut_is_refused(wa):
+    r = FakeRunner()
+    with pytest.raises(InvalidArgument) as exc:
+        send_message(wa, GROUP_JID, "hi", method="shortcut", confirm=True, env={"WA_ALLOW_SEND": "1"}, runner=r)
+    assert "shortcut" in exc.value.message and "people" in exc.value.message
+    assert r.calls == []
+
+
+def test_group_confirm_still_requires_env(wa):
+    r = FakeRunner()
+    with pytest.raises(SendRefused):
+        send_message(wa, GROUP_JID, "hi", confirm=True, env={}, runner=r)
+    assert r.calls == []
+
+
+def test_cli_send_group_draft(data_dir, capsys):
+    rc, out = _cli(capsys, "send", "--to", GROUP_JID, "--text", "test", "--via", "desktop")
+    assert rc == 0
+    assert out["sent"] is False and out["mode"] == "draft" and out["via"] == "desktop"
+    assert out["to"]["kind"] == "group" and out["to"]["jid"] == GROUP_JID and out["to"]["phone"] is None
+
+
+@pytest.mark.parametrize("to", ["status@broadcast", "120363000000000099@newsletter"])
+def test_cli_send_refuses_lists_and_channels(data_dir, capsys, to):
+    rc, out = _cli(capsys, "send", "--to", to, "--text", "test")
+    assert rc == 1 and out["error"] == "invalid_argument"
+
+
+def test_mcp_send_group_draft(data_dir):
+    from wa import mcp_server
+
+    out = mcp_server.wa_send_message(GROUP_JID, "test")
+    assert out["sent"] is False and out["mode"] == "draft" and out["to"]["kind"] == "group"
+    assert mcp_server.wa_send_message("120363000000000099@newsletter", "test")["error"] == "invalid_argument"
+    assert mcp_server.wa_send_message(GROUP_JID, "test", method="shortcut")["error"] == "invalid_argument"
 
 
 def test_draft_url_encoding():

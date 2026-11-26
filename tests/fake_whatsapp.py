@@ -28,6 +28,25 @@ EN = {
 }
 PT = {v: k for k, v in EN.items()}
 
+# Real (trimmed) output of `ioreg -n Root -d1`.
+IOREG_UNLOCKED = (
+    '+-o Root  <class IORegistryEntry, id 0x100000100, retain 40>\n'
+    '    "IOConsoleLocked" = No\n'
+    '    "IOConsoleUsers" = ({"kCGSSessionOnConsoleKey"=Yes,"kCGSSessionIDKey"=257,'
+    '"kCGSessionLoginDoneKey"=Yes,"kCGSSessionUserNameKey"="me"})\n'
+)
+IOREG_LOCKED = (
+    '+-o Root  <class IORegistryEntry, id 0x100000100, retain 40>\n'
+    '    "IOConsoleLocked" = Yes\n'
+    '    "IOConsoleUsers" = ({"kCGSSessionOnConsoleKey"=Yes,"kCGSSessionIDKey"=257,'
+    '"CGSSessionScreenLockedTime"=1795637566,"CGSSessionScreenIsLocked"=Yes,'
+    '"kCGSSessionUserNameKey"="me"})\n'
+)
+
+
+def ioreg_result(cmd, locked: bool):
+    return subprocess.CompletedProcess(cmd, 0, stdout=IOREG_LOCKED if locked else IOREG_UNLOCKED, stderr="")
+
 
 class FakeClock:
     def __init__(self, start: float = 1_800_000_000.0):
@@ -49,8 +68,9 @@ def _item(title, enabled=True, sub=None):
 class FakeWhatsApp:
     def __init__(self, db_path, chat_by_phone: dict[str, int], *, front="WhatsApp", write_db=True,
                  call_starts=True, hangup_works=True, devices_mic=None, devices_out=None, stderr_for=None,
-                 ignore_clicks=0, lang="pt"):
+                 ignore_clicks=0, lang="pt", locked=False):
         self.lang = lang
+        self.locked = locked  # Mac screen locked (ioreg)
         self.db_path = db_path
         self.chat_by_phone = chat_by_phone
         self.front = front
@@ -192,6 +212,8 @@ class FakeWhatsApp:
 
     def __call__(self, cmd, **kw):
         self.calls.append(cmd)
+        if cmd[0] == "ioreg":
+            return ioreg_result(cmd, self.locked)
         if cmd[0] == "open":
             q = parse_qs(urlparse(cmd[1]).query)
             phone = q.get("phone", [""])[0]
@@ -233,4 +255,4 @@ def make_ui(fake, clock):
     return WhatsAppUI(runner=fake, sleep=clock.sleep, clock=clock)
 
 
-__all__ = ["FakeWhatsApp", "FakeClock", "make_ui", "APPLE"]
+__all__ = ["FakeWhatsApp", "FakeClock", "make_ui", "ioreg_result", "IOREG_LOCKED", "IOREG_UNLOCKED", "APPLE"]

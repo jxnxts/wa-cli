@@ -9,7 +9,7 @@ from fake_whatsapp import FakeClock, FakeWhatsApp, make_ui
 from wa import actions, cli, mcp_server
 from wa.actions import chat_action, hangup, start_call
 from wa.core import WhatsApp
-from wa.db import AccessibilityError, ActionFailed, ActionRefused, InvalidArgument
+from wa.db import AccessibilityError, ActionFailed, ActionRefused, InvalidArgument, ScreenLockedError
 from wa.ui import norm_title, script_click
 
 ACT = {"WA_ALLOW_ACTIONS": "1"}
@@ -91,7 +91,8 @@ def test_action_clicks_and_verifies(wa, env, action, clicked, key, expected):
     assert out["done"] is True and out["clicked"] == clicked and out["verified"] is True
     assert out["state_after"][key] == expected
     assert fake.clicked == [clicked]
-    assert fake.calls[0] == ["open", f"whatsapp://send?phone={BRUNO_PHONE}"]
+    assert fake.calls[0] == ["ioreg", "-n", "Root", "-d1"]  # locked screen check first
+    assert fake.calls[1] == ["open", f"whatsapp://send?phone={BRUNO_PHONE}"]
 
 
 @pytest.mark.parametrize(
@@ -394,3 +395,47 @@ def test_mcp_actions_and_calls(data_dir, monkeypatch):
     assert mcp_server.wa_list_calls(missed_only=True)["count"] == 1
     assert mcp_server.wa_list_lists()["count"] == 0
     assert fake.clicked == ["Arquivar"]
+
+
+# ------------------------------------------------------------ locked screen / timeouts
+
+
+def test_actions_fail_fast_when_screen_locked(wa, env):
+    fake, ui = env(locked=True)
+    with pytest.raises(ScreenLockedError) as exc:
+        chat_action(wa, "bruno", "archive", confirm=True, env=ACT, ui=ui)
+    assert "locked" in exc.value.message and "Nothing was done" in exc.value.message
+    assert [c[0] for c in fake.calls] == ["ioreg"]  # nothing opened or clicked
+    assert fake.clicked == []
+
+
+def test_call_and_hangup_fail_fast_when_screen_locked(wa, env):
+    fake, ui = env(locked=True)
+    with pytest.raises(ScreenLockedError):
+        start_call(wa, "bruno", confirm=True, env=CALLS, ui=ui)
+    with pytest.raises(ScreenLockedError):
+        hangup(confirm=True, env=CALLS, ui=ui)
+    assert {c[0] for c in fake.calls} == {"ioreg"}
+
+
+def test_locked_screen_plan_still_works(wa, env):
+    fake, ui = env(locked=True)
+    assert chat_action(wa, "bruno", "archive", env=ACT, ui=ui)["mode"] == "plan"
+    assert fake.calls == []
+
+
+def test_action_timeout_is_action_failed(wa, env):
+    import subprocess
+
+    fake, ui = env()
+    real = fake.__call__
+
+    def hanging(cmd, **kw):
+        if cmd[0] == "osascript" and "-- wa:list-bar" in cmd[2]:
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        return real(cmd, **kw)
+
+    ui.runner = hanging
+    with pytest.raises(ActionFailed) as exc:
+        chat_action(wa, "bruno", "archive", confirm=True, env=ACT, ui=ui)
+    assert "locked" in exc.value.message and exc.value.message.endswith("Nothing was done.")

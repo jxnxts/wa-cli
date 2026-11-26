@@ -8,6 +8,10 @@ simulate the app.
 
 Titles are looked up in every language listed by the caller (see `actions.py`),
 so the same code works with WhatsApp in Portuguese or English.
+
+Before the first script to System Events, it checks through `ioreg` (without
+System Events) whether the Mac screen is locked; if it is, it fails right away
+instead of waiting for the osascript timeout.
 """
 
 from __future__ import annotations
@@ -18,13 +22,16 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .db import ActionFailed
-from .send import APP_PROCESS, _FRONT_SCRIPT, osascript
+from .send import APP_PROCESS, _FRONT_SCRIPT, ensure_screen_unlocked, osascript
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
 FRONT_TIMEOUT = 5.0
 POLL = 0.5
 LRM = "‎"
+SCREEN_LOCKED_ACTION_MESSAGE = (
+    "The Mac screen is locked; actions through the WhatsApp app need an unlocked session. Nothing was done."
+)
 
 
 def clean(title: str | None) -> str:
@@ -124,9 +131,18 @@ class WhatsAppUI:
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.time
     log: list[str] = field(default_factory=list)
+    _screen_checked: bool = field(default=False, init=False, repr=False)
+
+    def ensure_unlocked(self) -> None:
+        ensure_screen_unlocked(self.runner, SCREEN_LOCKED_ACTION_MESSAGE)
+        self._screen_checked = True
 
     def osa(self, script: str) -> str:
-        return osascript(self.runner, script)
+        if "System Events" in script and not self._screen_checked:
+            self.ensure_unlocked()
+        # A timeout on a click: the click may have happened before System Events hung.
+        outcome = "Check WhatsApp to see whether the click happened." if script.startswith("-- wa:click") else "Nothing was done."
+        return osascript(self.runner, script, outcome=outcome, error_cls=ActionFailed)
 
     def open_url(self, url: str) -> None:
         proc = self.runner(["open", url], capture_output=True, text=True, timeout=15)

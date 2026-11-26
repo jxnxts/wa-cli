@@ -838,26 +838,80 @@ class WhatsApp:
             out.append(v)
         return {"count": len(out), "lists": out}
 
+    def resolve_group(self, jid: str) -> dict:
+        """A known group (a chat in the database) -> {name, jid, phone: None, kind: "group"}."""
+        where, params = self._chat_filter("s", None)
+        rows = db.query(
+            self.conn,
+            f"SELECT s.ZCONTACTJID, s.ZPARTNERNAME, s.ZSESSIONTYPE FROM ZWACHATSESSION s "
+            f"WHERE {where} AND s.ZCONTACTJID = ? ORDER BY s.ZLASTMESSAGEDATE DESC LIMIT 1",
+            [*params, jid],
+        )
+        if not rows:
+            raise NotFoundError(f"group not found among the known chats: {jid}")
+        r = rows[0]
+        kind = SESSION_KINDS.get(r["ZSESSIONTYPE"])
+        if kind == "community":
+            raise InvalidArgument(
+                f"{jid} is a community, not a group: you cannot send to the community itself. "
+                "Use the jid of its announcements group or of one of its groups (wa chats --groups)."
+            )
+        if kind != "group":
+            raise InvalidArgument(f"{jid} is not a group (kind {kind or r['ZSESSIONTYPE']})")
+        return {"name": r["ZPARTNERNAME"], "jid": jid, "phone": None, "kind": "group"}
+
     def resolve_recipient(self, to: str) -> dict:
-        """Resolve a send recipient (a person) -> {name, phone(+E164), jid}."""
+        """Resolve a send recipient -> {name, jid, phone, kind}.
+
+        - a person (phone number, @s.whatsapp.net, @lid or address book name): `kind="person"`,
+          `phone` in +E164 and `jid` in the @s.whatsapp.net form;
+        - a group (`…@g.us`, must be among the known chats): `kind="group"`, `phone=None`
+          and `jid` the @g.us itself.
+        Broadcast lists (@broadcast), status and channels (@newsletter) are refused.
+        """
         if not to or not str(to).strip():
             raise InvalidArgument("give the recipient")
         to = str(to).strip()
         if "@" in to:
+            if to.endswith("@g.us"):
+                return self.resolve_group(to)
+            if to.endswith("@broadcast"):
+                raise InvalidArgument(
+                    "sending to broadcast lists and status (@broadcast) is not supported; "
+                    "use a person (phone number, @s.whatsapp.net, @lid) or a group (@g.us)"
+                )
+            if to.endswith("@newsletter"):
+                raise InvalidArgument(
+                    "sending to channels (@newsletter) is not supported; "
+                    "use a person (phone number, @s.whatsapp.net, @lid) or a group (@g.us)"
+                )
             if not (to.endswith("@s.whatsapp.net") or to.endswith("@lid")):
-                raise InvalidArgument("sending only to people (phone number, @s.whatsapp.net or @lid); groups, broadcast lists and channels are not supported")
+                raise InvalidArgument(
+                    "invalid recipient: use a phone number, @s.whatsapp.net, @lid (person) or @g.us (group)"
+                )
             digits = self.phone_for_jid(to)
             if not digits:
                 raise NotFoundError(f"could not find the phone number of contact {to}")
-            return {"name": self.contact_name(to) or self.contact_name(f"{digits}@s.whatsapp.net"), "phone": f"+{digits}", "jid": f"{digits}@s.whatsapp.net"}
+            return {
+                "name": self.contact_name(to) or self.contact_name(f"{digits}@s.whatsapp.net"),
+                "jid": f"{digits}@s.whatsapp.net",
+                "phone": f"+{digits}",
+                "kind": "person",
+            }
         if looks_like_phone(to):
             digits = phone_digits(to)
             if len(digits) < 10:
                 raise InvalidArgument("the phone number needs the country and area code (e.g. +1 415 555 0123)")
             jid = f"{digits}@s.whatsapp.net"
-            return {"name": self.contact_name(jid), "phone": f"+{digits}", "jid": jid}
+            return {"name": self.contact_name(jid), "jid": jid, "phone": f"+{digits}", "kind": "person"}
         found = [c for c in self.find_contacts(to, limit=MAX_LIMIT)["contacts"] if c.get("phone")]
         if not found:
+            groups = self.list_chats(kind="group", query=to, limit=10)["chats"]
+            if groups:
+                raise NotFoundError(
+                    f"no contact called {to!r}; to send to a group, use its jid (…@g.us)",
+                    candidates=[{"name": g["name"], "jid": g["jid"], "kind": "group"} for g in groups],
+                )
             raise NotFoundError(f"contact not found or without a phone number: {to}")
         by_phone = {c["phone"]: c for c in found}
         if len(by_phone) > 1:
@@ -870,7 +924,12 @@ class WhatsApp:
                     candidates=[{"name": c["name"], "phone": c["phone"]} for c in list(by_phone.values())[:10]],
                 )
         c = next(iter(by_phone.values()))
-        return {"name": c["name"], "phone": c["phone"], "jid": c["jid"] or f"{phone_digits(c['phone'])}@s.whatsapp.net"}
+        return {
+            "name": c["name"],
+            "jid": c["jid"] or f"{phone_digits(c['phone'])}@s.whatsapp.net",
+            "phone": c["phone"],
+            "kind": "person",
+        }
 
 
 __all__ = ["WhatsApp", "WAError", "SESSION_KINDS", "MESSAGE_TYPES", "parse_when"]

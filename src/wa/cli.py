@@ -93,15 +93,18 @@ def build_parser() -> argparse.ArgumentParser:
     _common_out(p)
 
     p = sub.add_parser("send", help="draft a message; really sends only with --confirm and WA_ALLOW_SEND=1")
-    p.add_argument("--to", required=True, help="phone number with country code, jid or contact name; a group by jid (…@g.us) only through the companion")
+    p.add_argument("--to", required=True,
+                   help="phone number with country code, jid (@s.whatsapp.net/@lid), contact name or group jid (…@g.us); "
+                        "broadcast lists (@broadcast) and channels (@newsletter) are refused")
     p.add_argument("--text", required=True)
     p.add_argument("--confirm", action="store_true", help="really send (needs WA_ALLOW_SEND=1)")
     p.add_argument("--via", choices=comp.VIAS, default="auto",
                    help="auto (default): the companion if it is connected, otherwise the app UI; companion; desktop")
     p.add_argument("--reply-to", help="id of the message to quote (companion only)")
     p.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD,
-                   help="through the app UI (desktop): ui (default) opens the chat, presses Return with WhatsApp in front "
-                        "and checks the database; shortcut: the 'WA Send' shortcut; draft: only opens the chat with the text filled in")
+                   help="through the app UI (desktop): ui (default) opens the chat (a group through whatsapp://openchat/<jid>, "
+                        "with the text pasted), presses Return with WhatsApp in front and checks the database; needs an "
+                        "unlocked screen; shortcut: the 'WA Send' shortcut (people only); draft: only opens the chat")
     _common_out(p)
 
     p = sub.add_parser("chat-action", help="archive, pin, mute and so on (a plan; runs with --confirm and WA_ALLOW_ACTIONS=1)")

@@ -275,11 +275,39 @@ def test_resolve_recipient(wa):
     assert wa.resolve_recipient(BRUNO_LID)["phone"] == f"+{BRUNO_PHONE}"
     assert wa.resolve_recipient("+55 61 91111-2222")["jid"] == ANA_JID
     assert wa.resolve_recipient("Ana Paula")["phone"] == "+5561922223333"
+    assert wa.resolve_recipient("bruno")["kind"] == "person"
     with pytest.raises(AmbiguousError):
         wa.resolve_recipient("ana")
-    with pytest.raises(InvalidArgument):
-        wa.resolve_recipient(GROUP_JID)
     with pytest.raises(InvalidArgument):
         wa.resolve_recipient("123456789")
     with pytest.raises(NotFoundError):
         wa.resolve_recipient("12345@lid")
+
+
+def test_resolve_recipient_group(wa, monkeypatch):
+    monkeypatch.setattr(wa, "jids_for_phone", lambda *_: pytest.fail("a group has no phone number"))
+    assert wa.resolve_recipient(GROUP_JID) == {"name": "Família", "jid": GROUP_JID, "phone": None, "kind": "group"}
+    with pytest.raises(NotFoundError):
+        wa.resolve_recipient("120363999999999999@g.us")  # unknown group
+
+
+def test_resolve_recipient_group_name_hints_jid(wa):
+    # A group name does not resolve on its own (so nothing goes to the wrong place), but it suggests the jid.
+    with pytest.raises(NotFoundError) as exc:
+        wa.resolve_recipient("Família")
+    assert exc.value.details["candidates"] == [{"name": "Família", "jid": GROUP_JID, "kind": "group"}]
+
+
+@pytest.mark.parametrize(
+    "to,word",
+    [
+        ("status@broadcast", "broadcast lists"),
+        ("123456789@broadcast", "broadcast lists"),
+        ("120363000000000099@newsletter", "channels"),
+        ("abc@c.us", "invalid recipient"),
+    ],
+)
+def test_resolve_recipient_refuses_lists_and_channels(wa, to, word):
+    with pytest.raises(InvalidArgument) as exc:
+        wa.resolve_recipient(to)
+    assert word in exc.value.message

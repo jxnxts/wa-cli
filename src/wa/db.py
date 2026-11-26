@@ -89,6 +89,12 @@ class AutomationError(WAError):
     code = "automation_permission_required"
 
 
+class ScreenLockedError(WAError):
+    """The Mac screen is locked: System Events does not answer (and sending through the UI would hang)."""
+
+    code = "screen_locked"
+
+
 class ActionRefused(WAError):
     code = "action_refused"
 

@@ -4,19 +4,33 @@ A real send needs both:
 1. `confirm=True` (on the CLI, `--confirm`);
 2. `WA_ALLOW_SEND=1` in the process environment.
 
+Recipients: people (phone number, @s.whatsapp.net, @lid, address book name) and groups
+(`…@g.us`, which must be among the known chats). Broadcast lists (@broadcast) and
+channels (@newsletter) are refused.
+
 Methods:
-- `ui` (default): opens `whatsapp://send?phone=...&text=...`, brings WhatsApp to the
-  front, presses Return **only if the frontmost process is "WhatsApp"** and confirms
-  in the database (read-only) that the message showed up. Needs Accessibility.
+- `ui` (default): first checks (through `ioreg`, without System Events) that the Mac
+  screen is not locked; then opens the chat, brings WhatsApp to the front, presses
+  Return **only if the frontmost process is "WhatsApp"** and confirms in the database
+  (read-only) that the message showed up. Needs Accessibility.
+  - person: opens `whatsapp://send?phone=<digits>&text=<text>` (the chat with the
+    text already in the compose box).
+  - group: opens `whatsapp://openchat/<jid@g.us>`, WhatsApp's own deep link to open a
+    chat by JID (it takes no text). The text goes through the clipboard: the current
+    text content is saved, the message text is copied, Cmd+A and Cmd+V go to the
+    compose box (only with WhatsApp in front), then Return, and the clipboard gets its
+    previous text back.
 - `shortcut`: runs a Shortcuts app shortcut (default "WA Send", change it with
   `WA_SHORTCUT_NAME`) with the JSON {"to": "+1...", "text": "..."} as input.
-- `draft`: never sends; only opens the chat with the text filled in.
+  People only (the shortcut takes a phone number).
+- `draft`: never sends; only opens the chat (with the text filled in, for a person).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -29,8 +43,10 @@ from .db import (
     AccessibilityError,
     AutomationError,
     InvalidArgument,
+    ScreenLockedError,
     SendFailed,
     SendRefused,
+    WAError,
 )
 
 MAX_SEND_CHARS = 4096
@@ -44,6 +60,9 @@ UI_LOAD_DELAY = 3.0  # after opening the URL, so the text lands in the compose b
 UI_FRONT_TIMEOUT = 5.0  # waiting for WhatsApp to become frontmost
 UI_CONFIRM_TIMEOUT = 10.0  # waiting for the message to show up in the database
 UI_POLL = 0.5
+UI_PASTE_DELAY = 0.5  # group: after pasting, before Return
+OSASCRIPT_TIMEOUT = 15.0
+IOREG_TIMEOUT = 5.0
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -58,6 +77,21 @@ AUTOMATION_MESSAGE = (
     "Settings > Privacy & Security > Automation, allow the process that runs "
     "`wa` to control \"System Events\" and \"WhatsApp\". Nothing was sent."
 )
+
+SCREEN_LOCKED_MESSAGE = (
+    "The Mac screen is locked; sending through the app needs an unlocked session. Nothing was sent."
+)
+SYSTEM_EVENTS_TIMEOUT_MESSAGE = (
+    "System Events did not answer osascript within {timeout:g} s (timeout). Common causes: the Mac "
+    "screen is locked (System Events does not answer on the lock screen), the process that runs `wa` "
+    "lacks Accessibility/Automation permission, or WhatsApp is not in front or is waiting on a dialog. "
+    "{outcome}"
+)
+APP_TIMEOUT_MESSAGE = (
+    "WhatsApp did not answer osascript within {timeout:g} s (timeout). Check that the app is open "
+    "and has no pending dialog. {outcome}"
+)
+NOTHING_SENT = "Nothing was sent."
 
 _FRONT_SCRIPT = (
     'tell application "System Events" to get name of first application process whose frontmost is true'
@@ -74,8 +108,76 @@ _PRESS_SCRIPT = f"""tell application "System Events"
 end tell"""
 
 
+# Group: paste the text (Cmd+A, Cmd+V) into the compose box, only with WhatsApp in front.
+_PASTE_SCRIPT = f"""-- wa:paste
+tell application "System Events"
+  set fp to name of first application process whose frontmost is true
+  if fp is "{APP_PROCESS}" then
+    keystroke "a" using command down
+    keystroke "v" using command down
+    return "pasted"
+  else
+    return "front:" & fp
+  end if
+end tell"""
+
+
 def draft_url(phone: str, text: str) -> str:
     return f"whatsapp://send?phone={phone_digits(phone)}&text={quote(text, safe='')}"
+
+
+def group_chat_url(jid: str) -> str:
+    """Opens the chat by JID (WhatsApp's `openchat` deep link); it does not fill in text."""
+    return f"whatsapp://openchat/{quote(jid, safe='@.')}"
+
+
+def is_group(recipient: Mapping) -> bool:
+    return recipient.get("kind") == "group"
+
+
+def open_url_for(recipient: Mapping, text: str) -> str:
+    if is_group(recipient):
+        return group_chat_url(recipient["jid"])
+    return draft_url(recipient["phone"], text)
+
+
+# ------------------------------------------------------------ locked screen
+
+IOREG_CMD = ["ioreg", "-n", "Root", "-d1"]
+_ROOT_LOCKED = re.compile(r'"IOConsoleLocked"\s*=\s*Yes')
+_SESSION = re.compile(r"\{[^{}]*\}")
+_SESSION_ON_CONSOLE = re.compile(r'"kCGSSessionOnConsoleKey"\s*=\s*Yes')
+_SESSION_LOCKED = re.compile(r'"CGSSessionScreenIsLocked"\s*=\s*Yes')
+
+
+def parse_screen_locked(ioreg_out: str) -> bool:
+    """Reads `ioreg -n Root -d1` output: locked if `IOConsoleLocked = Yes` or if the console
+    session has `CGSSessionScreenIsLocked=Yes` (the key goes away when the screen unlocks)."""
+    out = ioreg_out or ""
+    if _ROOT_LOCKED.search(out):
+        return True
+    for session in _SESSION.findall(out):
+        if _SESSION_ON_CONSOLE.search(session) and _SESSION_LOCKED.search(session):
+            return True
+    return False
+
+
+def screen_locked(runner: Runner = subprocess.run) -> bool | None:
+    """True/False from the `ioreg` output (no System Events); None when it cannot tell."""
+    try:
+        proc = runner(IOREG_CMD, capture_output=True, text=True, timeout=IOREG_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return None
+    return parse_screen_locked(proc.stdout)
+
+
+def ensure_screen_unlocked(runner: Runner = subprocess.run, message: str = SCREEN_LOCKED_MESSAGE) -> None:
+    """Fails fast (before any Apple Event to System Events) when the screen is locked.
+    If `ioreg` does not answer, it goes on: the osascript timeout covers that case."""
+    if screen_locked(runner):
+        raise ScreenLockedError(message, reason="screen_locked")
 
 
 def shortcut_name(env: Mapping[str, str]) -> str:
@@ -114,18 +216,58 @@ def _classify_osascript_error(stderr: str) -> None:
         raise AutomationError(AUTOMATION_MESSAGE, detail=(stderr or "").strip()[:300])
 
 
-def osascript(runner: Runner, script: str, timeout: float = 15) -> str:
+def osascript(
+    runner: Runner,
+    script: str,
+    timeout: float = OSASCRIPT_TIMEOUT,
+    *,
+    outcome: str = NOTHING_SENT,
+    error_cls: type[WAError] = SendFailed,
+) -> str:
     try:
         proc = runner(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise SendFailed("osascript did not respond (timeout). Nothing was sent.") from None
+        template = SYSTEM_EVENTS_TIMEOUT_MESSAGE if "System Events" in script else APP_TIMEOUT_MESSAGE
+        raise error_cls(template.format(timeout=timeout, outcome=outcome), reason="osascript_timeout") from None
     if proc.returncode != 0:
         _classify_osascript_error(proc.stderr)
-        raise SendFailed("osascript failed.", stderr=(proc.stderr or "").strip()[:300])
+        raise error_cls("osascript failed.", stderr=(proc.stderr or "").strip()[:300])
     return (proc.stdout or "").strip()
 
 
 # ------------------------------------------------------------ methods
+
+
+_UTF8_ENV = {"LANG": "en_US.UTF-8", "LC_CTYPE": "en_US.UTF-8"}
+
+
+def _clipboard_get(runner: Runner) -> str | None:
+    """Current clipboard text (None when it cannot be read)."""
+    try:
+        proc = runner(["pbpaste"], capture_output=True, text=True, timeout=5, env={**os.environ, **_UTF8_ENV})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _clipboard_set(runner: Runner, text: str) -> bool:
+    try:
+        proc = runner(["pbcopy"], input=text, capture_output=True, text=True, timeout=5, env={**os.environ, **_UTF8_ENV})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
+def _not_sent(result: dict, reason: str, note: str, pressed: bool = False) -> dict:
+    result.update({"sent": False, "mode": "not_sent", "reason": reason, "pressed_return": pressed, "note": note})
+    return result
+
+
+def _confirm_jids(wa: WhatsApp, recipient: dict) -> list[str]:
+    if is_group(recipient):
+        return [recipient["jid"]]  # a group has no phone number: check by the group JID only
+    jids = [recipient["jid"], *wa.jids_for_phone(phone_digits(recipient["phone"]))]
+    return list(dict.fromkeys(j for j in jids if j))
 
 
 def _send_ui(
@@ -137,70 +279,82 @@ def _send_ui(
     sleep: Callable[[float], None],
     clock: Callable[[], float],
 ) -> dict:
+    # Locked screen: System Events does not answer and everything times out. Fail fast.
+    ensure_screen_unlocked(runner)
+
     started = clock()
     since_apple = started - APPLE_EPOCH_OFFSET - 2  # slack for clock skew/rounding
+    group = is_group(recipient)
+    jids = _confirm_jids(wa, recipient)
 
-    proc = runner(["open", draft_url(recipient["phone"], text)], capture_output=True, text=True, timeout=15)
-    if proc.returncode != 0:
-        raise SendFailed("Could not open the WhatsApp link.", stderr=(proc.stderr or "").strip()[:300])
-    sleep(UI_LOAD_DELAY)
+    saved_clipboard: str | None = None
+    if group:
+        saved_clipboard = _clipboard_get(runner)
+        if not _clipboard_set(runner, text):
+            raise SendFailed("Could not copy the text to the clipboard (pbcopy). Nothing was sent.")
 
-    # Bring it to the front and wait up to UI_FRONT_TIMEOUT.
-    osascript(runner, f'tell application "{APP_PROCESS}" to activate')
-    deadline = clock() + UI_FRONT_TIMEOUT
-    front = osascript(runner, _FRONT_SCRIPT)
-    while front != APP_PROCESS and clock() < deadline:
-        sleep(UI_POLL)
+    try:
+        proc = runner(["open", open_url_for(recipient, text)], capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            raise SendFailed("Could not open the WhatsApp link. Nothing was sent.", stderr=(proc.stderr or "").strip()[:300])
+        sleep(UI_LOAD_DELAY)
+
+        # Bring it to the front and wait up to UI_FRONT_TIMEOUT.
+        osascript(runner, f'tell application "{APP_PROCESS}" to activate')
+        deadline = clock() + UI_FRONT_TIMEOUT
         front = osascript(runner, _FRONT_SCRIPT)
-    if front != APP_PROCESS:
-        result.update(
-            {
-                "sent": False,
-                "mode": "not_sent",
-                "reason": "whatsapp_not_frontmost",
-                "pressed_return": False,
-                "note": "WhatsApp did not become frontmost; Return was not pressed. Nothing was sent.",
-            }
-        )
-        return result
+        while front != APP_PROCESS and clock() < deadline:
+            sleep(UI_POLL)
+            front = osascript(runner, _FRONT_SCRIPT)
+        if front != APP_PROCESS:
+            return _not_sent(
+                result, "whatsapp_not_frontmost",
+                "WhatsApp did not become frontmost; Return was not pressed. Nothing was sent.",
+            )
 
-    out = osascript(runner, _PRESS_SCRIPT)
-    if out != "pressed":
-        result.update(
-            {
-                "sent": False,
-                "mode": "not_sent",
-                "reason": "whatsapp_not_frontmost",
-                "pressed_return": False,
-                "note": "Another app came to the front before Return; nothing was sent.",
-            }
-        )
-        return result
+        if group:
+            if osascript(runner, _PASTE_SCRIPT) != "pasted":
+                return _not_sent(
+                    result, "whatsapp_not_frontmost",
+                    "Another app came to the front before the paste; nothing was pasted or sent.",
+                )
+            sleep(UI_PASTE_DELAY)
+
+        try:
+            out = osascript(runner, _PRESS_SCRIPT)
+        except SendFailed as exc:
+            if exc.details.get("reason") != "osascript_timeout":
+                raise
+            # Only claim "nothing was sent" after looking at the database.
+            if wa.find_sent_message(jids, text, since_apple) is None:
+                raise
+            out = "pressed"
+        if out != "pressed":
+            return _not_sent(result, "whatsapp_not_frontmost", "Another app came to the front before Return; nothing was sent.")
+    finally:
+        if group and saved_clipboard is not None:
+            result["clipboard_restored"] = _clipboard_set(runner, saved_clipboard)
 
     # Confirm in the database (read-only).
-    jids = [recipient["jid"], *wa.jids_for_phone(phone_digits(recipient["phone"]))]
-    jids = list(dict.fromkeys(j for j in jids if j))
     deadline = clock() + UI_CONFIRM_TIMEOUT
     found = wa.find_sent_message(jids, text, since_apple)
     while found is None and clock() < deadline:
         sleep(UI_POLL)
         found = wa.find_sent_message(jids, text, since_apple)
     if found is None:
-        result.update(
-            {
-                "sent": False,
-                "mode": "not_sent",
-                "reason": "not_confirmed_in_db",
-                "pressed_return": True,
-                "note": (
-                    "Return was pressed, but the message did not show up in the database within "
-                    f"{int(UI_CONFIRM_TIMEOUT)} s. Check WhatsApp before trying again "
-                    "(so you don't send it twice)."
-                ),
-            }
+        return _not_sent(
+            result, "not_confirmed_in_db",
+            "Return was pressed, but the message did not show up in the database within "
+            f"{int(UI_CONFIRM_TIMEOUT)} s. Check WhatsApp before trying again "
+            "(so you don't send it twice).",
+            pressed=True,
         )
-        return result
     result.update({"sent": True, "mode": "sent", "pressed_return": True, "confirmation": found})
+    if group and not found.get("chat_matched"):
+        result["warning"] = (
+            f"The message showed up in chat {found.get('chat_jid')}, not in group {recipient['jid']}. "
+            "Check WhatsApp."
+        )
     return result
 
 
@@ -267,6 +421,11 @@ def send_message(
         raise InvalidArgument(f"invalid method: {method!r} (use {', '.join(METHODS)})")
     text = validate_text(text, max_chars)
     recipient = wa.resolve_recipient(to)
+    if method == "shortcut" and is_group(recipient):
+        raise InvalidArgument(
+            "method 'shortcut' only sends to people (the shortcut takes a phone number); "
+            "for a group use method 'ui' (the default)"
+        )
     result: dict = {
         "sent": False,
         "mode": "draft",
@@ -274,13 +433,22 @@ def send_message(
         "to": recipient,
         "text": text,
         "chars": len(text),
+        "open_url": open_url_for(recipient, text),
     }
+    if is_group(recipient) and method != "shortcut":
+        result["group_note"] = (
+            "Group: the chat opens through whatsapp://openchat/<jid> (the link carries no text); "
+            "on a real send the text goes through the clipboard (Cmd+V) and the clipboard gets its previous text back."
+        )
 
     if not confirm or method == "draft":
         if confirm and method == "draft":
-            result["note"] = "--method draft never sends; it only opens the chat with the text filled in."
+            result["note"] = "--method draft never sends; it only opens the chat" + (
+                " (for a group, without the text: the openchat link carries no text)."
+                if is_group(recipient) else " with the text filled in."
+            )
         if method == "draft" and open_draft:
-            proc = runner(["open", draft_url(recipient["phone"], text)], capture_output=True, text=True, timeout=15)
+            proc = runner(["open", open_url_for(recipient, text)], capture_output=True, text=True, timeout=15)
             result["draft_opened"] = proc.returncode == 0
             if proc.returncode != 0:
                 result["draft_error"] = (proc.stderr or "").strip()[:500]

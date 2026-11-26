@@ -46,6 +46,8 @@ Without Full Disk Access every command returns:
 
 Without Accessibility or Automation, sending stops before it presses any key and returns `accessibility_required` or `automation_permission_required`.
 
+Sending, actions and calls through the app also need the Mac screen unlocked. Before it touches the app, `wa` reads the lock state with `ioreg` (no System Events involved). When the screen is locked it stops with `screen_locked`, and nothing is opened, pasted, clicked or sent. Reads and drafts work with the screen locked.
+
 ## 3. Safety guards
 
 Nothing that changes state happens unless both conditions below hold:
@@ -62,6 +64,7 @@ Nothing that changes state happens unless both conditions below hold:
 Other rules:
 
 - Through the app UI, the tool clicks only when WhatsApp is the frontmost app. If another app takes focus, it refuses (`whatsapp_not_frontmost`) instead of clicking in the wrong place.
+- Through the app UI, nothing runs while the Mac screen is locked (`screen_locked`).
 - If the database does not confirm a toggle action, the tool tries a second time and stops (`attempts` shows how many there were).
 - Block, delete and clear chat do not exist, on purpose.
 - The WhatsApp Desktop databases are never changed. Archiving and similar actions sync with the phone, so they go through the app UI or the companion, never through a database write.
@@ -69,7 +72,7 @@ Other rules:
 
 ## 4. Commands
 
-Every command returns JSON (one line). `--pretty` indents it. Errors are JSON too, with exit code 1. The `error` field holds a stable code: `not_found`, `ambiguous`, `invalid_argument`, `full_disk_access_required`, `accessibility_required`, `automation_permission_required`, `send_refused`, `send_failed`, `action_refused`, `action_failed`, `database_busy`, `companion_unavailable`, `companion_failed`, `rate_limited`, `missing_dependency` and others.
+Every command returns JSON (one line). `--pretty` indents it. Errors are JSON too, with exit code 1. The `error` field holds a stable code: `not_found`, `ambiguous`, `invalid_argument`, `full_disk_access_required`, `accessibility_required`, `automation_permission_required`, `screen_locked`, `send_refused`, `send_failed`, `action_refused`, `action_failed`, `database_busy`, `companion_unavailable`, `companion_failed`, `rate_limited`, `missing_dependency` and others.
 
 ```sh
 wa chats [--limit N] [--unread] [--archived] [--groups|--direct|--kind K] [--query NAME] [--include-hidden]
@@ -122,7 +125,7 @@ wa send --to "+1…" --text "…" --method draft                            # on
 
 ```sh
 WA_ALLOW_SEND=1 wa send --to "+1…" --text "Hi!" --confirm --via companion        # forces the companion
-WA_ALLOW_SEND=1 wa send --to "1203…@g.us" --text "Good morning" --confirm         # group by jid (companion)
+WA_ALLOW_SEND=1 wa send --to "1203…@g.us" --text "Good morning" --confirm         # group by jid (companion or app)
 WA_ALLOW_SEND=1 wa send --to "+1…" --text "Deal" --reply-to 3EB0… --confirm       # quoted reply (companion)
 wa send --to "+1…" --text "…" --via desktop                                      # forces the app UI
 ```
@@ -131,23 +134,26 @@ The answer always names the path it used in `via` (`companion` or `desktop`). Te
 
 How a real send through the app UI (`--method ui`, the default) works:
 
-1. It opens `whatsapp://send?phone=<digits>&text=<text>`, which opens the chat with the text in the compose box (without sending), and waits about 3 s.
-2. It brings WhatsApp to the front (`activate`) and waits up to about 5 s for it to become frontmost.
-3. It presses Return **only if the frontmost process is "WhatsApp"**. The check and the keystroke run in the same script, so there is no race with another app.
-4. It queries the database (read-only) for up to about 10 s, looking in that number's chats for a message of yours with exactly the same text and a date after the start.
+1. It checks that the Mac screen is unlocked (`ioreg`). If it is locked, it stops with `screen_locked`.
+2. For a person, it opens `whatsapp://send?phone=<digits>&text=<text>`, which opens the chat with the text in the compose box (without sending). For a group, it opens `whatsapp://openchat/<jid>`, which takes no text, so it first saves your clipboard text and copies the message to the clipboard. It waits about 3 s.
+3. It brings WhatsApp to the front (`activate`) and waits up to about 5 s for it to become frontmost.
+4. For a group, it presses Cmd+A and Cmd+V in the compose box, again only with WhatsApp in front.
+5. It presses Return **only if the frontmost process is "WhatsApp"**. The check and the keystroke run in the same script, so there is no race with another app.
+6. For a group, it puts your previous clipboard text back (`clipboard_restored`), even when the send stops early.
+7. It queries the database (read-only) for up to about 10 s, looking in that number's chats (or in the group chat) for a message of yours with exactly the same text and a date after the start.
 
 WhatsApp comes to the front for a moment during the send. Do not type anything during that time.
 
 Results:
 
-- `"sent": true` with `confirmation` (`message_id`, `status`, `date`, `chat_jid`, `chat_matched`) means the message showed up in the database. `chat_matched: false` means it showed up in a chat whose JID `wa` did not know (a new chat).
+- `"sent": true` with `confirmation` (`message_id`, `status`, `date`, `chat_jid`, `chat_matched`) means the message showed up in the database. `chat_matched: false` means it showed up in a chat whose JID `wa` did not know (a new chat). For a group, that case also adds a `warning`.
 - `"sent": false` comes with a `reason`:
   - `whatsapp_not_frontmost`: WhatsApp did not come to the front, Return was **not** pressed and nothing was sent;
   - `not_confirmed_in_db`: Return **was** pressed (`pressed_return: true`), but the message did not show up in the database in time. Check WhatsApp before you retry, so you don't send it twice.
 
 On the CLI, `--confirm` without a confirmed send exits with code 1.
 
-Through the app UI, `wa` sends only to **people** (a phone number, `@s.whatsapp.net`, or `@lid` with a known phone number). Groups need the companion and a group jid.
+Recipients are **people** (a phone number, `@s.whatsapp.net`, or `@lid` with a known phone number) and **groups** by jid (`…@g.us`, which must be a chat in the database; find it with `wa chats --groups`). A group name alone does not resolve. `wa` returns `not_found` with the matching group jids as candidates. Communities, broadcast lists (`@broadcast`) and channels (`@newsletter`) are refused with `invalid_argument`. `--method shortcut` only sends to people. The group send through the app has only run against simulators.
 
 #### Shortcuts method (optional, `--method shortcut`)
 
@@ -400,6 +406,8 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 | `full_disk_access_required` | grant Full Disk Access to the app that runs the agent and reopen it |
 | `accessibility_required` / `automation_permission_required` | grant Accessibility and accept Automation for that app |
 | `whatsapp_not_frontmost` | another app was in front; try again without touching the Mac |
+| `screen_locked` | the Mac screen is locked; unlock it and try again (nothing was sent or clicked) |
+| `send_failed` / `action_failed` with `reason: osascript_timeout` | System Events or WhatsApp did not answer; check the lock screen, the permissions and any open dialog in WhatsApp |
 | `verified: false`, `not_seen_in_db` | the action may not have taken; check WhatsApp before you retry |
 | `The item 'Mute' is disabled` | the chat does not allow it (for example, the chat with yourself) |
 | `action_failed` with `menu_items` | the WhatsApp UI is in a language `wa` does not know yet, or the title changed |
@@ -416,7 +424,7 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 - Calling, hanging up, muting and the voice agent have not been tested on a real account yet.
 - The English menu titles come from the localization files (`en.lproj` in WhatsApp.app and in its SharedModules framework) and have not been tested on a real account. Other UI languages are not supported for desktop actions yet.
 - Lists through the companion, the "unavailable" presence and actions through the companion have **not** been tested on a real account yet. Through the app UI, creating or moving lists does not exist (there is no menu for it).
-- Groups without a phone number only accept sending and actions through the companion (by jid).
+- Groups accept sending through the app or the companion (by jid). Chat actions on a group only work through the companion.
 - Through the app UI, WhatsApp comes to the front for a moment for every send or action.
 - The companion inbox `--unread` is approximate (see section 5).
 - The database notes are for WhatsApp 26.46 (see [DEVELOPMENT.md](DEVELOPMENT.md#database-notes-whatsapp-for-mac-2646)). The databases are opened read-only and never copied. Status updates (stories) are left out.
@@ -426,7 +434,9 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 | Feature | Status |
 |---|---|
 | Reading chats, messages, search and contacts | tested on a real account |
-| Sending through the app | tested on a real account (Portuguese UI) |
+| Sending to a person through the app | tested on a real account (Portuguese UI) |
+| Sending to a group through the app | simulated tests only |
+| Locked-screen check (`screen_locked`) | simulated tests only |
 | Archive, unarchive and pin through the app | tested on a real account (Portuguese UI) |
 | Calling, hanging up, muting and the voice agent | simulated tests only |
 | English WhatsApp UI | simulated tests only, titles taken from the localization files |

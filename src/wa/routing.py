@@ -29,7 +29,7 @@ ClientFactory = Callable[[], comp.GowaClient]
 def _planned_via(via: str, client_factory: ClientFactory) -> tuple[str, str | None]:
     """Expected path for a draft/plan (without raising)."""
     if via not in comp.VIAS:
-        raise InvalidArgument(f"via inválida: {via!r} (use {', '.join(comp.VIAS)})")
+        raise InvalidArgument(f"invalid via: {via!r} (use {', '.join(comp.VIAS)})")
     if via == "desktop":
         return "desktop", None
     connected = comp.is_connected(client_factory())

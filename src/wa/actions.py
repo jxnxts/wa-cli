@@ -185,6 +185,7 @@ def chat_action(
 
     ui = ui or WhatsAppUI()
     result["mode"] = "executed"
+    ui.ensure_unlocked()  # screen_locked before anything opens or gets clicked
     if not _open_chat(ui, rec["phone"]):
         result.update(reason="whatsapp_not_frontmost", note="WhatsApp did not become frontmost; nothing was clicked.")
         return result
@@ -306,6 +307,7 @@ def start_call(
 
     ui = ui or WhatsAppUI()
     result["mode"] = "executed"
+    ui.ensure_unlocked()  # screen_locked before anything opens or gets clicked
     if call_active(ui):
         raise ActionFailed("A call is already in progress; end it first (wa hangup).")
     if not _open_chat(ui, rec["phone"]):
@@ -350,6 +352,7 @@ def hangup(
         raise ActionRefused("Refused: set WA_ALLOW_CALLS=1 in the process environment.", plan=result)
     ui = ui or WhatsAppUI()
     result["mode"] = "executed"
+    ui.ensure_unlocked()  # screen_locked before anything opens or gets clicked
     if not ui.bring_to_front():
         result.update(reason="whatsapp_not_frontmost")
         return result

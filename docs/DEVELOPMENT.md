@@ -37,7 +37,7 @@ The connection opens with `mode=ro` and sets `PRAGMA query_only=ON`. It reads th
 
 ## How sends through the app are guarded
 
-The keystroke or menu click happens only when WhatsApp is the frontmost app. The focus check and the action run in the same script. If another app takes focus, the command refuses with `whatsapp_not_frontmost`. After a send, `wa` looks for the message in the database and reports it in `confirmation`. After an action, it checks the chat state in the database and reports `verified`.
+Before it touches the app, `wa` reads the screen lock state from `ioreg -n Root -d1` (`IOConsoleLocked`, or `CGSSessionScreenIsLocked` on the console session), without System Events. A locked screen stops the command with `screen_locked`. If `ioreg` gives no answer, the osascript timeout covers it. The keystroke or menu click happens only when WhatsApp is the frontmost app. The focus check and the action run in the same script. If another app takes focus, the command refuses with `whatsapp_not_frontmost`. After a send, `wa` looks for the message in the database and reports it in `confirmation`. After an action, it checks the chat state in the database and reports `verified`.
 
 ## Menu titles and languages
 
