@@ -371,7 +371,7 @@ wa companion service stop           # stops it (it does not come back until the 
 
 `build-gowa.sh` accepts `GOWA_SRC` (the `src/` folder of a local clone of the fork; it uses that code and downloads nothing), `GOWA_REPO` and `GOWA_REF` (default: the public fork, branch `wa-companion`) and `WA_GOWA_DIR` (data folder).
 
-The service (`local.wa-mac.gowa`) listens **only on 127.0.0.1:3787**, requires Basic Auth with a user and password (the password lives in the Keychain, service `wa-mac-gowa`, and never shows up on screen or in logs) and restarts if it crashes. Its settings are fixed. It does not send read receipts, does not auto-reply, does not reject calls and does not download media. It has no webhooks, no Chatwoot and no web dashboard, and it does not go "online" (presence is sent as unavailable, so the phone keeps notifying). Logs are in `~/.local/share/wa-mac/gowa/logs/`. To change the port, set `WA_GOWA_PORT`.
+The service (`local.wa-mac.gowa`) listens **only on 127.0.0.1:3787**, requires Basic Auth with a user and password (the password lives in the Keychain, service `wa-mac-gowa`, and never shows up on screen or in logs) and restarts if it crashes. Its settings are fixed. It does not send read receipts, does not auto-reply, does not reject calls and does not download media. It has no webhooks, no Chatwoot and no web dashboard, and it does not go "online" (presence is sent as unavailable, so the phone keeps notifying). Logs are in `~/.local/share/wa-mac/gowa/logs/`. To change the port, set `WA_GOWA_PORT`. launchd starts agents with a bare PATH, so the plist sets one with the folder of the ffmpeg found at install time, Homebrew's folders and the system ones: GoWA needs ffmpeg to send videos and voice notes. After installing ffmpeg, run `wa companion service start` again; when the plist changes it reloads the agent instead of only restarting it.
 
 ### Pair (phone in hand)
 
@@ -538,5 +538,7 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 | Chat actions through the companion (archive, unarchive, pin, mute, unmute, mark unread) | tested on a real account |
 | Unpin through the companion | not confirmed (Desktop kept the chat pinned) |
 | Chat lists through the companion (create, add a chat, remove it, delete) | tested on a real account |
-| Companion sending and inbox | experimental, simulated tests only |
-| Media: metadata, `wa media` (images, documents, OCR, transcripts, video frames), download through the companion and sending files | simulated tests only |
+| Companion text sending and inbox | experimental, simulated tests only |
+| Media: image OCR, PDF text and voice note transcripts (`wa media`) | tested on a real account |
+| Sending an image with a caption, a PDF and a voice note through the companion | tested on a real account |
+| Media: videos (sending, frames and transcript), DOCX/XLSX/PPTX, files fetched through the companion, images through MCP | simulated tests only |

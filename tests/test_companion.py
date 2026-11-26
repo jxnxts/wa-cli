@@ -6,6 +6,7 @@ import json
 import plistlib
 import sqlite3
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -516,7 +517,31 @@ def test_run_script_and_plist_have_safe_config(tmp_path):
     pl = plistlib.loads(service.render_plist(tmp_path / "gowa"))
     assert pl["Label"] == "local.wa-mac.gowa" and pl["KeepAlive"] is True
     assert pl["StandardErrorPath"].startswith(str(tmp_path / "gowa" / "logs"))
-    assert "EnvironmentVariables" not in pl  # no secrets in the plist
+    assert set(pl["EnvironmentVariables"]) == {"PATH"}  # no secrets in the plist, only PATH
+
+
+def test_plist_path_finds_ffmpeg_outside_launchd_default(tmp_path):
+    """launchd's bare PATH has no Homebrew: GoWA answered 'ffmpeg not installed' when sending a video."""
+    found = {}
+
+    def which(name, path=None):
+        found["search"] = path
+        return "/opt/homebrew/bin/ffmpeg" if name == "ffmpeg" else None
+
+    path = service.service_path({"PATH": "/usr/bin:/bin"}, which=which)
+    dirs = path.split(":")
+    assert "/opt/homebrew/bin" in found["search"].split(":")
+    assert dirs[0] == "/opt/homebrew/bin"
+    assert {"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} <= set(dirs)
+    assert len(dirs) == len(set(dirs))
+
+    custom = service.service_path({"PATH": "/opt/tools/bin"}, which=lambda n, path=None: "/opt/tools/bin/ffmpeg")
+    assert custom.split(":")[0] == "/opt/tools/bin"
+    none = service.service_path({}, which=lambda n, path=None: None)
+    assert none.split(":") == list(service.SERVICE_PATH_DIRS)
+
+    pl = plistlib.loads(service.render_plist(tmp_path / "gowa", custom))
+    assert pl["EnvironmentVariables"]["PATH"] == custom
 
 
 class FakeSecurity:
@@ -560,6 +585,39 @@ def test_service_status_parses_launchctl_and_lsof(tmp_path, gowa, monkeypatch):
     assert out["loaded"] and out["pid"] == 4242 and out["listen"] == ["127.0.0.1:3787"]
     assert out["loopback_only"] is True and out["healthy"] is True and out["auth_required"] is True
     assert out["data_dir_mode"] == "0o700"
+
+
+def test_service_start_reloads_when_the_plist_changed(tmp_path, gowa, monkeypatch):
+    """kickstart keeps the old plist (and its PATH); a changed plist needs bootout + bootstrap."""
+    data = tmp_path / "gowa"
+    monkeypatch.setenv("WA_GOWA_DIR", str(data))
+    plist = tmp_path / "LaunchAgents" / "local.wa-mac.gowa.plist"
+    monkeypatch.setattr(comp, "plist_path", lambda: plist)
+    (data / "bin").mkdir(parents=True)
+    (data / "bin" / "gowa").write_text("#!/bin/sh\n")
+    sec = FakeSecurity()
+    sec.store = SECRET
+    calls = []
+
+    def runner(cmd, **kw):
+        if cmd[0] == "security":
+            return sec(cmd, **kw)
+        calls.append(cmd[:2])
+        if cmd[:2] == ["launchctl", "print"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="\tstate = running\n\tpid = 1\n", stderr="")
+        if cmd[0] in ("launchctl", "lsof"):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(cmd)
+
+    plist.parent.mkdir()
+    plist.write_bytes(b"old plist without PATH")
+    out = service.start(runner=runner, client=comp.GowaClient(gowa.url, SECRET), sleep=lambda s: None)
+    assert out["action"] == "reloaded"
+    assert ["launchctl", "bootout"] in calls and ["launchctl", "bootstrap"] in calls
+    assert "PATH" in plistlib.loads(plist.read_bytes())["EnvironmentVariables"]
+    calls.clear()
+    out = service.start(runner=runner, client=comp.GowaClient(gowa.url, SECRET), sleep=lambda s: None)
+    assert out["action"] == "restarted" and ["launchctl", "kickstart"] in calls and ["launchctl", "bootout"] not in calls
 
 
 def test_service_install_refuses_without_binary(tmp_path, monkeypatch):

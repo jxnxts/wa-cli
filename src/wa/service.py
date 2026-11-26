@@ -6,6 +6,11 @@ environment variable (never on the command line, never in a file). All GoWA
 settings live in the script generated here: 127.0.0.1 only, no read receipts,
 no auto-reply, no call rejection, no Chatwoot, no webhook, no web dashboard,
 no GoWA MCP, no media download and no periodic "online" presence.
+
+launchd starts agents with a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin), where GoWA
+cannot find the ffmpeg it needs for videos and voice notes. The plist sets PATH to the
+folder of the ffmpeg found now (if any), Homebrew's folders and the system ones. It is
+the only variable in the plist, and it holds no secret.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from __future__ import annotations
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -81,10 +87,26 @@ def render_run_script(data: Path, port: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_plist(data: Path) -> bytes:
+SERVICE_PATH_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def service_path(env: Mapping[str, str] | None = None, which: Callable[..., str | None] = shutil.which) -> str:
+    """PATH for the LaunchAgent: the detected ffmpeg's folder first, then Homebrew and the system."""
+    env = os.environ if env is None else env
+    search = os.pathsep.join([env.get("PATH", ""), *SERVICE_PATH_DIRS])
+    dirs: list[str] = []
+    ffmpeg = which("ffmpeg", path=search)
+    if ffmpeg:
+        dirs.append(str(Path(ffmpeg).parent))  # not resolved: a Homebrew Cellar path changes on upgrade
+    dirs += SERVICE_PATH_DIRS
+    return os.pathsep.join(dict.fromkeys(dirs))
+
+
+def render_plist(data: Path, path: str | None = None) -> bytes:
     logs = data / "logs"
     return plistlib.dumps(
         {
+            "EnvironmentVariables": {"PATH": path or service_path()},
             "Label": comp.LAUNCH_LABEL,
             "ProgramArguments": ["/bin/sh", str(data / "bin" / "gowa-run.sh")],
             "WorkingDirectory": str(data),
@@ -130,7 +152,7 @@ def install(env: Mapping[str, str] | None = None, runner: Runner = subprocess.ru
     os.chmod(script, 0o700)
     plist = comp.plist_path()
     plist.parent.mkdir(parents=True, exist_ok=True)
-    plist.write_bytes(render_plist(data))
+    plist.write_bytes(render_plist(data, service_path(env)))
     os.chmod(plist, 0o644)
     return {"data_dir": str(data), "binary": str(gowa), "run_script": str(script), "plist": str(plist),
             "credential_created": created}
@@ -169,8 +191,19 @@ def _wait_health(client: comp.GowaClient, timeout: float, sleep, clock) -> bool:
 def start(env: Mapping[str, str] | None = None, runner: Runner = subprocess.run,
           client: comp.GowaClient | None = None, sleep=time.sleep, clock=time.monotonic) -> dict:
     env = os.environ if env is None else env
+    try:
+        before = comp.plist_path().read_bytes()
+    except OSError:
+        before = None
     info = install(env, runner)
-    if loaded(runner):
+    changed = before != comp.plist_path().read_bytes()
+    is_loaded = loaded(runner)
+    if is_loaded and changed:
+        # kickstart keeps the plist launchd loaded before (its PATH, for one): reload it.
+        runner(["launchctl", "bootout", f"{_domain()}/{comp.LAUNCH_LABEL}"], capture_output=True, text=True, timeout=30)
+        proc = runner(["launchctl", "bootstrap", _domain(), info["plist"]], capture_output=True, text=True, timeout=30)
+        action = "reloaded"
+    elif is_loaded:
         proc = runner(["launchctl", "kickstart", "-k", f"{_domain()}/{comp.LAUNCH_LABEL}"],
                       capture_output=True, text=True, timeout=30)
         action = "restarted"
