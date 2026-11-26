@@ -45,7 +45,11 @@ CREATE TABLE ZWAGROUPMEMBER (
   ZCONTACTIDENTIFIER VARCHAR, ZCONTACTNAME VARCHAR, ZFIRSTNAME VARCHAR, ZMEMBERJID VARCHAR
 );
 CREATE TABLE ZWAMEDIAITEM (
-  Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, Z_OPT INTEGER, ZMESSAGE INTEGER, ZMEDIALOCALPATH VARCHAR, ZTITLE VARCHAR
+  Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, Z_OPT INTEGER, ZCLOUDSTATUS INTEGER, ZFILESIZE INTEGER,
+  ZMEDIAORIGIN INTEGER, ZMOVIEDURATION INTEGER, ZMESSAGE INTEGER, ZASPECTRATIO FLOAT, ZHACCURACY FLOAT,
+  ZLATITUDE FLOAT, ZLONGITUDE FLOAT, ZMEDIAURLDATE TIMESTAMP, ZAUTHORNAME VARCHAR, ZCOLLECTIONNAME VARCHAR,
+  ZMEDIALOCALPATH VARCHAR, ZMEDIAURL VARCHAR, ZTHUMBNAILLOCALPATH VARCHAR, ZTITLE VARCHAR, ZVCARDNAME VARCHAR,
+  ZVCARDSTRING VARCHAR, ZXMPPTHUMBPATH VARCHAR, ZMEDIAKEY BLOB, ZMETADATA BLOB
 );
 CREATE TABLE ZWAPROFILEPUSHNAME (Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, Z_OPT INTEGER, ZJID VARCHAR, ZPUSHNAME VARCHAR);
 CREATE TABLE ZWACHATPROPERTIES (
@@ -244,7 +248,10 @@ def _isolate_companion(tmp_path, monkeypatch):
     monkeypatch.setenv("WA_MAC_HOME", str(tmp_path / "wa-mac-home"))
     monkeypatch.setenv("WA_GOWA_URL", "http://127.0.0.1:9")
     for key in ("WA_ALLOW_ACTIONS", "WA_COMPANION_MAX_PER_MINUTE", "WA_COMPANION_MAX_PER_DAY",
-                "WA_COMPANION_DESKTOP_CHECK_S", "WA_GOWA_DIR", "WA_GOWA_PORT"):
+                "WA_COMPANION_DESKTOP_CHECK_S", "WA_GOWA_DIR", "WA_GOWA_PORT", "WA_MEDIA_OUTBOX", "WA_ALLOW_ANY_FILE",
+                "WA_MEDIA_CACHE_DIR", "WA_MEDIA_IMAGE_MAX_BYTES", "WA_TRANSCRIBE_ENGINE", "WA_TRANSCRIBE_MODEL",
+                "WA_TRANSCRIBE_LANGUAGE", "WA_TRANSCRIBE_REMOTE", "WA_WHISPER_CPP_MODEL", "WA_OCR_LANGUAGES",
+                "OPENAI_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(cli, "_companion_factory", lambda: _NoCompanion())
     monkeypatch.setattr(mcp_server, "_companion_factory", lambda: _NoCompanion())
@@ -264,6 +271,19 @@ def _isolate_companion(tmp_path, monkeypatch):
         return real_default_client(env, runner or no_keychain)
 
     monkeypatch.setattr(companion, "default_client", safe_default_client)
+
+    # The real transcribers on this Mac (mlx_whisper, whisper.cpp) are never run by the tests:
+    # tests that need one pass a fake through Tools(which=...).
+    from wa import extract
+
+    real_find = extract.Tools.find
+
+    def safe_find(self, name):
+        if self.which is None and name in ("mlx_whisper", "whisper-cli", "whisper-cpp"):
+            return None
+        return real_find(self, name)
+
+    monkeypatch.setattr(extract.Tools, "find", safe_find)
 
 
 @pytest.fixture

@@ -28,6 +28,17 @@ dependencies = [
     "websockets>=17.4",
 ]
 
+[project.optional-dependencies]
+# Reading media: documents, images and OCR (macOS Vision). ffmpeg and mlx-whisper are found at run time.
+media = [
+    "pypdf>=5",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
+    "Pillow>=11",
+    "pyobjc-framework-Vision>=11; sys_platform == 'darwin'",
+]
+
 [project.urls]
 Homepage = "https://github.com/jxnxts/whatsapp-mac"
 Repository = "https://github.com/jxnxts/whatsapp-mac"
@@ -40,6 +51,7 @@ wa-mcp = "wa.mcp_server:main"
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "wa-mac[media]",
 ]
 
 [build-system]

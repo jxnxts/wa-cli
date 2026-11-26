@@ -12,12 +12,14 @@ import sys
 
 from . import __version__
 from .core import WhatsApp
-from .db import WAError
+from .db import InvalidArgument, WAError
 from .actions import ACTIONS, chat_action, hangup, start_call
 from . import companion as comp
 from . import routing
 from .send import DEFAULT_METHOD, METHODS, send_message
 from .ui import WhatsAppUI
+from . import media as media_mod
+from . import media_send
 
 CLI_MAX_RESPONSE_CHARS = 2_000_000
 
@@ -73,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--cursor", help="next_cursor from the previous page")
     p.add_argument("--include-system", action="store_true", help="include group system notices")
+    p.add_argument("--media", choices=media_mod.FILTERS, help="only messages with this kind of media (any for all)")
     p.add_argument("--include-hidden", action="store_true")
     _common_out(p)
 
@@ -96,7 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", required=True,
                    help="phone number with country code, jid (@s.whatsapp.net/@lid), contact name or group jid (…@g.us); "
                         "broadcast lists (@broadcast) and channels (@newsletter) are refused")
-    p.add_argument("--text", required=True)
+    p.add_argument("--text", help="the message (or use --file)")
+    p.add_argument("--file", help="send a file through the companion; outside the outbox folder only with --allow-any-path")
+    p.add_argument("--caption", help="caption for an image, video or document (with --file)")
+    p.add_argument("--as", dest="as_kind", choices=media_send.SEND_KINDS,
+                   help="how to send the file (default: from its type; voice converts to ogg/opus with ffmpeg)")
+    p.add_argument("--allow-any-path", action="store_true",
+                   help="accept a --file outside the outbox folder (WA_MEDIA_OUTBOX, default ~/.local/share/wa-mac/outbox)")
     p.add_argument("--confirm", action="store_true", help="really send (needs WA_ALLOW_SEND=1)")
     p.add_argument("--via", choices=comp.VIAS, default="auto",
                    help="auto (default): the companion if it is connected, otherwise the app UI; companion; desktop")
@@ -105,6 +114,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="through the app UI (desktop): ui (default) opens the chat (a group through whatsapp://openchat/<jid>, "
                         "with the text pasted), presses Return with WhatsApp in front and checks the database; needs an "
                         "unlocked screen; shortcut: the 'WA Send' shortcut (people only); draft: only opens the chat")
+    _common_out(p)
+
+    p = sub.add_parser("media", help="read the media of a message: image, document text, OCR, transcript, video frames")
+    p.add_argument("--message", required=True, help="message id (the 'id' field of wa messages / wa search)")
+    p.add_argument("--no-ocr", action="store_true", help="skip OCR of images and scanned PDFs")
+    p.add_argument("--no-transcribe", action="store_true", help="skip the transcript of audio and video")
+    p.add_argument("--frames", type=int, help="video frames to extract (default 4, maximum 8, 0 for none)")
+    p.add_argument("--max-pages", type=int, help="pages, sheets or slides to read (default 10, maximum 50)")
+    p.add_argument("--max-chars", type=int, help="characters of text to return (default 20000)")
+    p.add_argument("--page-image", action="store_true", default=None,
+                   help="always add the first page of a PDF as an image (default: only when it has little text)")
+    p.add_argument("--no-download", action="store_true", help="do not ask the companion for files missing on the Mac")
+    p.add_argument("--include-hidden", action="store_true")
+    _common_out(p)
+
+    p = sub.add_parser("media-cache", help="size of the OCR/transcript cache; --clear deletes it")
+    p.add_argument("--clear", action="store_true")
     _common_out(p)
 
     p = sub.add_parser("chat-action", help="archive, pin, mute and so on (a plan; runs with --confirm and WA_ALLOW_ACTIONS=1)")
@@ -252,6 +278,11 @@ def run(argv: list[str] | None = None) -> int:
         if args.ccmd == "service" and args.op == "start" and not data.get("started"):
             return 1
         return 0
+    if args.cmd == "media-cache":
+        from . import cache
+
+        _emit(cache.clear() if args.clear else cache.stats(), pretty)
+        return 0
     if args.cmd == "voice-test":
         from .voice import voice_test
 
@@ -270,7 +301,7 @@ def run(argv: list[str] | None = None) -> int:
                 data = wa.read_messages(
                     args.chat, since=args.since, until=args.until, limit=args.limit,
                     cursor=args.cursor, include_system=args.include_system,
-                    max_chars=CLI_MAX_RESPONSE_CHARS,
+                    max_chars=CLI_MAX_RESPONSE_CHARS, media_kind=args.media,
                 )
             elif args.cmd == "search":
                 data = wa.search_messages(
@@ -279,7 +310,25 @@ def run(argv: list[str] | None = None) -> int:
                 )
             elif args.cmd == "contacts":
                 data = wa.find_contacts(args.query, limit=args.limit)
+            elif args.cmd == "media":
+                data, _images = media_mod.get_media(
+                    wa, args.message, ocr=not args.no_ocr, transcribe=not args.no_transcribe, frames=args.frames,
+                    max_pages=args.max_pages, max_chars=args.max_chars, page_image=args.page_image,
+                    download=not args.no_download, save_images=True, client_factory=_companion_factory,
+                )
+            elif args.cmd == "send" and args.file:
+                if args.text:
+                    raise InvalidArgument("with --file, put the text in --caption")
+                data = media_send.send_media(
+                    wa, args.to, args.file, caption=args.caption, as_kind=args.as_kind, confirm=args.confirm,
+                    via=args.via, reply_to=args.reply_to, allow_any_path=args.allow_any_path,
+                    client_factory=_companion_factory,
+                )
             elif args.cmd == "send":
+                if args.caption or args.as_kind or args.allow_any_path:
+                    raise InvalidArgument("--caption, --as and --allow-any-path go with --file")
+                if args.text is None:
+                    raise InvalidArgument("give --text or --file")
                 data = routing.send(
                     wa, args.to, args.text, confirm=args.confirm, via=args.via, method=args.method,
                     reply_to=args.reply_to, open_draft=(args.method == "draft"),

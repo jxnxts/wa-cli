@@ -8,7 +8,7 @@ uv run pytest
 uv run python scripts/smoke_real.py
 ```
 
-`pytest` never touches real data. It runs against synthetic SQLite databases and simulators of WhatsApp and GoWA (`tests/fake_whatsapp.py`, `tests/fake_gowa.py`), all with made-up content.
+`pytest` never touches real data. It runs against synthetic SQLite databases and simulators of WhatsApp and GoWA (`tests/fake_whatsapp.py`, `tests/fake_gowa.py`), all with made-up content. The media tests generate their own PNG, WAV, PDF, DOCX, XLSX, PPTX and MP4 files and use a fake mlx-whisper; the ones that need ffmpeg or Vision skip without them.
 
 `scripts/smoke_real.py` is the one script that opens your real database. It prints only counts and timings.
 
@@ -19,6 +19,11 @@ To try a change without installing, run `uvx --from . wa chats --limit 3`. To in
 ```
 src/wa/db.py          read-only connection, retries, permission errors
 src/wa/core.py        chats, messages, search, contacts, JID/phone/name resolution
+src/wa/media.py       media metadata, the local file, companion download, wa media
+src/wa/extract.py     reduced images, document text, OCR (Vision), video frames (ffmpeg)
+src/wa/transcribe.py  mlx-whisper, whisper.cpp, OpenAI (opt-in)
+src/wa/cache.py       OCR/transcript cache (700/600)
+src/wa/media_send.py  sending files through the companion, outbox guard
 src/wa/send.py        drafts and sending through the app (double confirmation)
 src/wa/ui.py          WhatsApp menu bar automation (System Events)
 src/wa/actions.py     chat actions, calling and hanging up, menu titles per language
@@ -52,6 +57,7 @@ The schema is not documented and can change in any release.
 - Pinned chats store `ZLASTMESSAGEDATE` in the far future. The real date comes from `ZLASTMESSAGE`.
 - In groups, the author comes from `ZWAMESSAGE.ZGROUPMEMBER → ZWAGROUPMEMBER.ZMEMBERJID`.
 - The flag for Advanced Chat Privacy has not been identified, so those chats are not filtered yet.
+- Media lives in `ZWAMEDIAITEM` (`ZWAMESSAGE.ZMEDIAITEM`). `ZVCARDSTRING` holds the MIME type, `ZFILESIZE` the size, `ZMOVIEDURATION` the seconds of audio and video or the page count of a document. Images and videos keep the caption in `ZTITLE`. Documents keep the file name in `ZAUTHORNAME`, the title in `ZWAMESSAGE.ZTEXT` and the caption in `ZTITLE`. `ZMEDIALOCALPATH` is relative to `Message/` and is set only when the file was downloaded. `ZMEDIAORIGIN = 1` marks audio recorded in the app (a voice note). The WhatsApp message id is `ZWAMESSAGE.ZSTANZAID`, the id GoWA uses in `/message/<id>/download`.
 
 ## Companion build
 

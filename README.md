@@ -14,6 +14,7 @@ It works with Grok Bot, Claude Code, Codex, Cursor, Gemini CLI, opencode and any
 
 - "What did I miss in the family group since yesterday?"
 - "Find the message where Alex sent the invoice."
+- "What does the PDF Alex sent say?" or "Transcribe the last voice note from Mom."
 - "Draft a reply to Alex and show it to me." You read the draft, and it goes out only if you say yes.
 - "Pin this chat and archive that one."
 - "Every morning, summarize my unread chats." Run it on a schedule from your agent; wa does the reading.
@@ -62,6 +63,7 @@ To test sending without bothering anyone, send to your own number. WhatsApp show
 ## How it works
 
 - **Reading.** WhatsApp Desktop keeps chats, contacts and call history in SQLite files on your Mac. `wa` opens them read-only and never changes or copies them.
+- **Media.** `wa media --message <id>` reads the file of a message: an image the agent can see, the text of a PDF or Office document, OCR, a transcript of a voice note, or frames of a video. `wa send --file` sends a file through the companion. The [guide](docs/GUIDE.md#media) lists what to install.
 - **Sending and actions.** By default `wa` drives the WhatsApp app: it opens the chat with your text, presses Return, and then checks the database for the sent message. For a group, pass its jid (`…@g.us`). `wa` opens the chat by jid, pastes the text through the clipboard and then puts your clipboard back. Archive, pin, mute and calls go through the app's menu bar. The app comes to the front for a moment each time. If the Mac screen is locked, `wa` refuses with `screen_locked` and does not touch the app.
 - **Companion (experimental).** Optionally, the Mac becomes a linked device, like WhatsApp Web, through [GoWA](https://github.com/aldinokemal/go-whatsapp-web-multidevice). That path sends in the background, sends to groups, replies with a quote, manages chat lists and reads incoming messages in real time. WhatsApp Desktop for Mac does not show your chat lists, so `wa lists` reads them from the companion. Read the caveats before you turn it on.
 - **Confirmation.** Anything that changes state needs two things: `--confirm` on the request (`confirm=true` in MCP) and the matching `WA_ALLOW_SEND`, `WA_ALLOW_ACTIONS` or `WA_ALLOW_CALLS` in the environment. All three are off by default. `wa` has no command to block, delete or clear chats.
@@ -94,11 +96,12 @@ With an empty `env` the server can only read. Add `"WA_ALLOW_SEND": "1"` to let 
 
 - **Not affiliated.** This project is not affiliated with, authorized or endorsed by WhatsApp or Meta. You are responsible for how you use it, including the [WhatsApp Terms of Service](https://www.whatsapp.com/legal/terms-of-service), data protection laws such as the GDPR or the LGPD, and the privacy of the people you talk to.
 - **Your chats reach your model provider.** Whatever the agent reads is sent to the provider of the model you use. `wa` itself has no telemetry, and reading or sending through the app opens no network connection of its own.
+- **Media stays local until the agent gets it.** OCR (macOS Vision) and transcription (mlx-whisper or whisper.cpp) run on your Mac. The OpenAI API transcribes only if you turn it on. The text, images and video frames that `wa` hands to the agent go to your model provider like any other message.
 - **Messages are untrusted input.** Anyone who writes to you controls part of what the model reads. The tool descriptions tell the model to treat message text as data, which does not stop prompt injection. Keep the switches off and read the draft before you confirm.
 - **The companion is an unofficial client.** WhatsApp does not allow it and can suspend or ban your number without warning. Use a test number if you can, and never send in bulk. Its session folder, `~/.local/share/wa-mac/gowa/storages/`, gives full access to your account until you unlink the device on your phone, so keep it out of backups, repositories and other computers.
 - **The voice agent speaks to other people for you.** It introduces itself as an assistant and never claims to be you. The call audio goes through OpenAI. Tell the other person when you can.
 - **macOS only, and language matters for some features.** Chat actions and calls find menu items by title. Brazilian Portuguese is tested. The English titles come from the app's localization files and are untested. In other languages those commands stop with `action_failed`. Reading and sending text work in any language.
-- **What has run on a real account.** Reading, sending to a person through the app, archive and pin (Portuguese UI), companion pairing, chat actions through the companion (archive, unarchive, pin, mute, unmute, mark unread) and chat lists through the companion (create, add a chat, remove it, delete). Unpin through the companion is not confirmed. Sending to a group through the app, the locked-screen check, calls, mute through the app, the voice agent, and sending and the inbox through the companion have only run against simulators.
+- **What has run on a real account.** Reading, sending to a person through the app, archive and pin (Portuguese UI), companion pairing, chat actions through the companion (archive, unarchive, pin, mute, unmute, mark unread) and chat lists through the companion (create, add a chat, remove it, delete). Unpin through the companion is not confirmed. Sending to a group through the app, the locked-screen check, calls, mute through the app, the voice agent, sending and the inbox through the companion, and reading and sending media have only run against simulators.
 - **No warranty.** `wa` clicks menus in a third-party app and reads a database schema that is not documented. It was tested with WhatsApp for Mac 26.46, and any release can break it.
 
 ## More

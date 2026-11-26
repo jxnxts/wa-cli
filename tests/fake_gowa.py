@@ -9,11 +9,30 @@ from __future__ import annotations
 import base64
 import json
 import threading
+from email import policy as email_policy
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 SECRET = "test-secret"
 USER = "wa-mac"
+
+
+def parse_multipart(ctype: str, raw: bytes) -> tuple[dict, dict | None]:
+    """Form fields and the uploaded file of a multipart/form-data body."""
+    msg = BytesParser(policy=email_policy.HTTP).parsebytes(
+        f"Content-Type: {ctype}\r\nMIME-Version: 1.0\r\n\r\n".encode() + raw)
+    form: dict = {}
+    upload = None
+    for part in msg.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        filename = part.get_filename()
+        data = part.get_payload(decode=True) or b""
+        if filename is not None:
+            upload = {"field": name, "filename": filename, "content_type": part.get_content_type(), "data": data}
+        else:
+            form[name] = data.decode()
+    return form, upload
 
 
 class FakeGowa:
@@ -30,6 +49,12 @@ class FakeGowa:
         self.list_echo = True  # False: GoWA accepts the patch but the echo never arrives
         self.lists_synced_at: str | None = "2026-11-26T12:00:00Z"
         self.fail: dict[str, tuple[int, dict]] = {}  # caminho -> (status, corpo)
+        # Media: limits in /app/info, files GoWA can download (stanza id -> (chat jid, file name, bytes)).
+        self.app_info = {"version": "test", "max_file_size": 50_000_000, "max_video_size": 100_000_000,
+                         "max_image_size": 20_000_000}
+        self.downloads: dict[str, tuple[str, str, bytes]] = {}
+        self.media_root = None  # GoWA's working folder (WA_GOWA_DIR); downloads land in statics/media
+        self.download_path_override: str | None = None
         self.pair_after_polls: int | None = None  # pairs after N status checks
         self.fail_pair_after_polls: int | None = None
         self._polls = 0
@@ -52,9 +77,15 @@ class FakeGowa:
                 parsed = urlparse(self.path)
                 path = unquote(parsed.path)
                 length = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(length) or b"null") if length else None
+                raw = self.rfile.read(length) if length else b""
+                ctype = self.headers.get("Content-Type") or ""
+                form = upload = None
+                if ctype.startswith("multipart/form-data"):
+                    body, form, upload = None, *parse_multipart(ctype, raw)
+                else:
+                    body = json.loads(raw or b"null") if length else None
                 call = {"method": method, "path": path, "query": {k: v[0] for k, v in parse_qs(parsed.query).items()},
-                        "body": body, "device": self.headers.get("X-Device-Id"),
+                        "body": body, "form": form, "upload": upload, "device": self.headers.get("X-Device-Id"),
                         "auth": self.headers.get("Authorization")}
                 fake.calls.append(call)
                 if path == "/health":
@@ -111,6 +142,24 @@ class FakeGowa:
                 self.pair = {"state": "failed", "error": "bad code"}
             return self.ok(h, {"device_id": "wa-mac", "jid": self.jid, "is_connected": self.connected,
                                "is_logged_in": self.logged_in, "pair": self.pair})
+        if path == "/app/info":
+            return self.ok(h, self.app_info)
+        if path.startswith("/send/") and path.split("/")[2] in ("image", "video", "audio", "file", "sticker"):
+            self._counter += 1
+            return self.ok(h, {"message_id": f"3EB0MEDIA{self._counter:04d}", "status": "Media sent"})
+        if path.startswith("/message/") and path.endswith("/download") and method == "GET":
+            stanza = path.split("/")[2]
+            entry = self.downloads.get(stanza)
+            if not entry or entry[0] != call["query"].get("phone"):
+                return h._send(500, {"code": "INTERNAL_SERVER_ERROR", "message": f"message not found: {stanza}"})
+            chat, name, data = entry
+            rel = f"statics/media/{chat.split('@')[0]}/2026-11-26/{name}"
+            target = self.media_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            return self.ok(h, {"message_id": stanza, "status": "Media downloaded successfully", "media_type": "image",
+                               "filename": name, "file_path": self.download_path_override or rel,
+                               "file_size": len(data)})
         if path == "/send/message" and method == "POST":
             self._counter += 1
             return self.ok(h, {"message_id": f"3EB0FAKE{self._counter:04d}", "status": "Message sent"})
