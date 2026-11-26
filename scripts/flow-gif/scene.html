@@ -1,0 +1,338 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!-- wa flow: README hero animation. Deterministic: window.render(t), t in [0,1). Built by build.py. -->
+<style>
+/* __FONTS__: build.py puts the @font-face rules for the fonts it finds here (Geist, JetBrains Mono) */
+:root {
+  --bg: #08090a; --p1: #0d0e10; --p2: #141517; --p3: #1b1c1f;
+  --line: #1f2124; --line2: #2b2d32; --line3: #3a3d43;
+  --text: #f7f8f8; --sec: #c3c6cc; --muted: #8a8f98; --dim: #5c6068;
+  --green: #12b76a; --green2: #34d188; --amber: #f2b84b;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1200px; height: 675px; background: var(--bg); overflow: hidden; }
+body { font-family: Geist, system-ui, sans-serif; color: var(--text); -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; }
+#stage { position: relative; width: 1200px; height: 675px; overflow: hidden; background: var(--bg); }
+#grid { position: absolute; inset: 0;
+  background: radial-gradient(circle at 1px 1px, #26282c 1px, transparent 1.3px) 0 0 / 24px 24px;
+  -webkit-mask-image: radial-gradient(520px 300px at 762px 330px, #000 0%, transparent 100%); opacity: .9; }
+.abs { position: absolute; }
+svg.logo { display: block; flex: none; }
+.mono { font-family: JBM, ui-monospace, monospace; }
+.lbl { font-size: 13.5px; font-weight: 500; color: var(--muted); display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+
+/* header */
+#mark { left: 56px; top: 44px; width: 46px; height: 46px; border-radius: 11px; background: var(--text); overflow: hidden; }
+#mark svg, #core svg { display: block; }
+#h1 { left: 118px; top: 37px; font-weight: 600; font-size: 33px; letter-spacing: -.035em; line-height: 1.15; white-space: nowrap; }
+#h2 { left: 118px; top: 79px; font-size: 16px; color: var(--muted); letter-spacing: -.005em; white-space: nowrap; }
+#h2 b { font-weight: 500; color: var(--sec); }
+#step { right: 56px; top: 42px; width: 330px; text-align: right; }
+#stepk { font-size: 12px; font-weight: 500; color: var(--muted); }
+.narr { position: absolute; right: 0; top: 24px; font-size: 16px; font-weight: 500; color: var(--text); white-space: nowrap; letter-spacing: -.01em; }
+
+/* panels */
+.panel { background: var(--p1); border: 1px solid var(--line); }
+#phone { left: 56px; top: 182px; width: 232px; height: 306px; border-radius: 28px; border-color: var(--line2); overflow: hidden; }
+#phead { height: 56px; display: flex; align-items: center; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+#pav { width: 30px; height: 30px; border-radius: 50%; background: var(--p3); border: 1px solid var(--line2); display: grid; place-items: center; font-weight: 600; font-size: 13px; color: var(--sec); }
+#pname { font-weight: 600; font-size: 15px; }
+.bub { position: absolute; font-size: 14.5px; line-height: 1.32; padding: 8px 12px; letter-spacing: -.005em; }
+.bub .meta { display: flex; justify-content: flex-end; align-items: center; gap: 4px; font-size: 10.5px; color: var(--muted); margin-top: 3px; }
+#bin { left: 14px; top: 72px; width: 172px; background: var(--p3); border-radius: 5px 16px 16px 16px; transform-origin: 0 0; }
+#bout { right: 14px; top: 160px; width: 150px; background: #0d4a35; border-radius: 16px 5px 16px 16px; color: #effff6; transform-origin: 100% 0; }
+#bout .meta { color: #86c9a8; }
+#typing { left: 14px; top: 72px; width: 54px; height: 34px; border-radius: 5px 16px 16px 16px; background: var(--p3); display: flex; align-items: center; justify-content: center; gap: 5px; }
+#typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); display: block; }
+#pinput { left: 14px; right: 14px; bottom: 14px; height: 36px; border-radius: 18px; border: 1px solid var(--line); background: var(--p2); display: flex; align-items: center; padding: 0 14px; font-size: 13px; color: var(--dim); }
+
+#mac { left: 330px; top: 182px; width: 528px; height: 306px; border-radius: 22px; }
+.row { position: absolute; left: 350px; width: 300px; height: 76px; border-radius: 14px; background: var(--p2); border: 1px solid var(--line2);
+  display: flex; align-items: center; padding: 0 16px; }
+.row .tt { display: flex; align-items: center; justify-content: space-between; width: 266px; }
+.row .t { font-weight: 600; font-size: 15.5px; letter-spacing: -.01em; white-space: nowrap; }
+.row .d { font-size: 13px; color: var(--muted); margin-top: 4px; white-space: nowrap; }
+.tag { font: 500 9.5px JBM, ui-monospace, Menlo, monospace; letter-spacing: .07em; padding: 2px 6px; border-radius: 6px; white-space: nowrap; }
+.tag.g { color: var(--green2); border: 1px solid #1d5a38; background: #0e2217; }
+.tag.a { color: var(--amber); border: 1px solid #6b5220; background: #231b0c; }
+#row1 { top: 216px; } #row2 { top: 356px; }
+.hl { position: absolute; inset: -1px; border-radius: 14px; border: 1px solid #fff; opacity: 0; pointer-events: none; }
+
+#halo { left: 602px; top: 150px; width: 320px; height: 320px; border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255,255,255,.085), rgba(255,255,255,.03) 45%, transparent 72%); }
+#core { left: 708px; top: 254px; width: 108px; height: 108px; border-radius: 26px; background: var(--text);
+  box-shadow: 0 0 0 6px rgba(255,255,255,.06), 0 18px 40px rgba(0,0,0,.6); }
+#ring { left: 708px; top: 254px; width: 108px; height: 108px; border-radius: 26px; border: 2px solid #fff; opacity: 0; }
+#coreT { left: 662px; top: 378px; width: 200px; text-align: center; font-weight: 600; font-size: 15.5px; letter-spacing: -.01em; }
+#gate { left: 662px; top: 412px; width: 200px; height: 30px; }
+.gp { position: absolute; left: 50%; top: 0; transform: translateX(-50%); height: 28px; padding: 0 12px 0 10px; border-radius: 14px; display: flex; align-items: center; gap: 6px;
+  font: 500 11px JBM, ui-monospace, Menlo, monospace; letter-spacing: .02em; white-space: nowrap; border: 1px solid var(--line2); background: var(--p2); color: var(--sec); }
+#gp1 { color: var(--amber); border-color: #6b5220; background: #231b0c; }
+#gp2 { color: var(--green2); border-color: #1d5a38; background: #0e2217; }
+
+#agents { left: 900px; top: 182px; width: 244px; height: 306px; border-radius: 22px; padding: 8px; }
+.ag { position: relative; height: 48.33px; border-radius: 13px; display: flex; align-items: center; gap: 12px; padding: 0 12px; font-size: 15px; font-weight: 500; color: var(--sec); letter-spacing: -.005em; }
+.ag .bg { position: absolute; inset: 0; border-radius: 13px; background: var(--p3); border: 1px solid var(--line2); opacity: 0; }
+.ag > * { position: relative; }
+.ag .lg { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex: none; }
+.st { position: absolute; right: 12px; top: 0; height: 48px; display: flex; align-items: center; font: 500 10.5px JBM, ui-monospace, Menlo, monospace; letter-spacing: .03em; }
+
+/* routines */
+#rl { left: 56px; top: 526px; }
+.rt { position: absolute; top: 552px; width: 257px; height: 96px; }
+.rt .ln { height: 1px; background: var(--line2); }
+.rt .hd { margin-top: 16px; font-weight: 600; font-size: 17px; letter-spacing: -.015em; color: var(--muted); }
+.rt .d { font-size: 14px; color: var(--muted); margin-top: 6px; white-space: nowrap; }
+
+/* wires */
+svg#wires { position: absolute; left: 0; top: 0; width: 1200px; height: 675px; }
+
+/* confirm dialog */
+#dim { inset: 0; background: #08090a; opacity: 0; }
+#dlg { left: 340px; top: 209px; width: 508px; height: 252px; border-radius: 20px; background: #121315; border: 1px solid var(--line3);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.6), 0 30px 70px rgba(0,0,0,.75); opacity: 0; transform-origin: 50% 60%; }
+#dh { height: 54px; display: flex; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid var(--line); font-size: 15px; font-weight: 500; white-space: nowrap; }
+#dto { left: 20px; top: 70px; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+#dto b { color: var(--sec); font-weight: 500; }
+#draft { left: 20px; top: 98px; width: 468px; height: 72px; border-radius: 14px; background: #0d4a35; border: 1px solid #17694b; color: #effff6;
+  font-size: 19px; font-weight: 500; letter-spacing: -.015em; display: flex; align-items: center; padding: 0 18px; white-space: pre; }
+#caret { display: inline-block; width: 2px; height: 22px; background: #effff6; margin-left: 2px; }
+#dfoot { left: 20px; right: 20px; bottom: 18px; height: 44px; display: flex; align-items: center; gap: 10px; }
+#dnote { font-size: 13px; color: var(--muted); flex: 1; white-space: nowrap; }
+.btn { height: 40px; border-radius: 11px; padding: 0 16px; display: flex; align-items: center; gap: 8px; font-size: 14.5px; font-weight: 600; white-space: nowrap; }
+#bcancel { color: var(--sec); border: 1px solid var(--line2); background: var(--p2); font-weight: 500; }
+#bok { position: relative; width: 124px; justify-content: center; color: #08090a; background: var(--text); }
+#bok .k { font: 500 11px JBM, ui-monospace, Menlo, monospace; padding: 2px 5px; border-radius: 5px; background: #d6d8dc; color: #2a2c30; }
+#bokA, #bokB { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; border-radius: 11px; }
+#bokB { background: var(--green); color: #04130b; opacity: 0; }
+</style></head>
+<body><div id="stage">
+  <div id="grid"></div>
+
+  <!-- header -->
+  <div id="mark" class="abs"><svg viewBox="4 4 56 56" width="100%" height="100%" aria-label="wa"><path d="M20.43 35.45 18.19 21.15H20.77L22.04 29.91Q22.15 30.72 22.22 31.65Q22.3 32.59 22.35 33.21Q22.38 32.59 22.46 31.65Q22.54 30.72 22.69 29.91L24.25 21.15H26.96L28.46 29.91Q28.62 30.72 28.71 31.67Q28.8 32.62 28.85 33.24Q28.91 32.62 28.97 31.67Q29.04 30.72 29.17 29.91L30.47 21.15H32.96L30.67 35.45H27.32L25.97 26.64Q25.84 25.91 25.73 24.96Q25.63 24.01 25.58 23.41Q25.55 24.01 25.42 24.96Q25.29 25.91 25.19 26.64L23.78 35.45ZM38.42 35.71Q36.24 35.71 34.98 34.48Q33.72 33.24 33.72 31.24Q33.72 29.16 35.15 27.92Q36.58 26.69 39.07 26.69H42.56V25.67Q42.56 23.52 40.03 23.52Q38.89 23.52 38.21 23.96Q37.54 24.4 37.46 25.21H34.34Q34.44 23.28 35.96 22.09Q37.49 20.89 40.06 20.89Q42.79 20.89 44.3 22.16Q45.81 23.44 45.81 25.75V35.45H42.63V32.77Q42.45 34.15 41.33 34.93Q40.22 35.71 38.42 35.71ZM39.46 33.06Q40.89 33.06 41.72 32.36Q42.56 31.65 42.56 30.48V28.79H39.23Q38.16 28.79 37.54 29.39Q36.91 29.99 36.91 30.93Q36.91 31.89 37.58 32.47Q38.24 33.06 39.46 33.06Z" fill="#08090a"/><path d="M35.16,39.31H44.36A0.92,0.92 0 0 1 45.29,40.23V42.59A0.92,0.92 0 0 1 44.36,43.51H35.16A0.92,0.92 0 0 1 34.24,42.59V40.23A0.92,0.92 0 0 1 35.16,39.31Z" fill="#12b76a"/></svg></div>
+  <div id="h1" class="abs">Your WhatsApp, for every AI agent.</div>
+  <div id="h2" class="abs"><b>Reads are local and read-only.</b> Nothing is sent or changed without your OK.</div>
+  <div id="step" class="abs">
+    <div id="stepk" class="mono">1 / 5</div>
+    <div class="narr">A message arrives in WhatsApp</div>
+    <div class="narr">wa reads it on your Mac, read-only</div>
+    <div class="narr">Any agent can use it over CLI or MCP</div>
+    <div class="narr">The draft waits for your OK</div>
+    <div class="narr">After your OK, the companion sends it</div>
+  </div>
+
+  <!-- column labels -->
+  <div class="abs lbl" style="left:56px;top:154px"><span style="color:#25d366">__WA_14__</span>WhatsApp on your phone</div>
+  <div class="abs lbl" style="left:330px;top:154px">Your Mac</div>
+  <div class="abs lbl" style="left:900px;top:154px">AI agents</div>
+
+  <!-- phone -->
+  <div id="phone" class="abs panel">
+    <div id="phead"><div id="pav">M</div><div id="pname">Maya</div></div>
+    <div id="typing" class="abs"><i></i><i></i><i></i></div>
+    <div id="bin" class="bub">Can we move the meeting to 7:30?<div class="meta">09:41</div></div>
+    <div id="bout" class="bub">Sure, 7:30 works. See you then.<div class="meta">09:42
+      <svg id="ticks" width="17" height="11" viewBox="0 0 17 11" fill="none" stroke="#86c9a8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 6l3 3 6-7.5"/><path d="M7 8.2l.9.8 6.1-7.5"/></svg></div></div>
+    <div id="pinput" class="abs">Message</div>
+  </div>
+
+  <!-- mac -->
+  <div id="mac" class="abs panel"></div>
+  <div id="halo" class="abs"></div>
+
+  <svg id="wires" viewBox="0 0 1200 675" fill="none" stroke-linecap="round"><g transform="translate(0,12)">
+    <g stroke="#34373d" stroke-width="1.5">
+      <path id="w1" d="M288,242 L350,242"/>
+      <path id="w2" d="M650,242 C682,242 676,282 708,282"/>
+      <path id="w3" d="M816,296 L900,296"/>
+      <path id="w4" d="M708,312 C676,312 682,382 650,382" stroke-dasharray="2 6"/>
+      <path id="w5" d="M350,382 L288,382" stroke-dasharray="2 6"/>
+    </g>
+    <g id="pulses"></g></g>
+  </svg>
+
+  <div id="row1" class="row">
+    <div><div class="tt"><span class="t">WhatsApp Desktop</span><span class="tag g">READ-ONLY</span></div><div class="d">local SQLite database</div></div>
+    <div class="hl"></div>
+  </div>
+  <div id="row2" class="row">
+    <div><div class="tt"><span class="t">Companion</span><span class="tag a">EXPERIMENTAL</span></div><div class="d">GoWA: sending, chat actions, live events</div></div>
+    <div class="hl"></div>
+  </div>
+
+  <div id="ring" class="abs"></div>
+  <div id="core" class="abs"><svg viewBox="4 4 56 56" width="100%" height="100%" aria-label="wa"><path d="M20.43 35.45 18.19 21.15H20.77L22.04 29.91Q22.15 30.72 22.22 31.65Q22.3 32.59 22.35 33.21Q22.38 32.59 22.46 31.65Q22.54 30.72 22.69 29.91L24.25 21.15H26.96L28.46 29.91Q28.62 30.72 28.71 31.67Q28.8 32.62 28.85 33.24Q28.91 32.62 28.97 31.67Q29.04 30.72 29.17 29.91L30.47 21.15H32.96L30.67 35.45H27.32L25.97 26.64Q25.84 25.91 25.73 24.96Q25.63 24.01 25.58 23.41Q25.55 24.01 25.42 24.96Q25.29 25.91 25.19 26.64L23.78 35.45ZM38.42 35.71Q36.24 35.71 34.98 34.48Q33.72 33.24 33.72 31.24Q33.72 29.16 35.15 27.92Q36.58 26.69 39.07 26.69H42.56V25.67Q42.56 23.52 40.03 23.52Q38.89 23.52 38.21 23.96Q37.54 24.4 37.46 25.21H34.34Q34.44 23.28 35.96 22.09Q37.49 20.89 40.06 20.89Q42.79 20.89 44.3 22.16Q45.81 23.44 45.81 25.75V35.45H42.63V32.77Q42.45 34.15 41.33 34.93Q40.22 35.71 38.42 35.71ZM39.46 33.06Q40.89 33.06 41.72 32.36Q42.56 31.65 42.56 30.48V28.79H39.23Q38.16 28.79 37.54 29.39Q36.91 29.99 36.91 30.93Q36.91 31.89 37.58 32.47Q38.24 33.06 39.46 33.06Z" fill="#08090a"/><path d="M35.16,39.31H44.36A0.92,0.92 0 0 1 45.29,40.23V42.59A0.92,0.92 0 0 1 44.36,43.51H35.16A0.92,0.92 0 0 1 34.24,42.59V40.23A0.92,0.92 0 0 1 35.16,39.31Z" fill="#12b76a"/></svg></div>
+  <div id="coreT" class="abs">CLI + MCP server</div>
+  <div id="gate" class="abs">
+    <div class="gp" id="gp0"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 018 0v3"/></svg>confirmation gate</div>
+    <div class="gp" id="gp1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 018 0v3"/></svg>waiting for your OK</div>
+    <div class="gp" id="gp2"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>approved by you</div>
+  </div>
+
+  <!-- agents -->
+  <div id="agents" class="abs panel">
+    <div class="ag" id="agA"><div class="bg"></div><div class="lg">__GROKBOT__</div><span>Grok Bot</span>
+      <span class="st" id="st1" style="color:var(--sec)">drafting</span><span class="st" id="st2" style="color:var(--amber)">needs OK</span><span class="st" id="st3" style="color:var(--green2)">sent</span></div>
+    <div class="ag"><div class="bg"></div><div class="lg">__CLAUDECODE__</div><span>Claude Code</span></div>
+    <div class="ag"><div class="bg"></div><div class="lg">__CODEX__</div><span>Codex</span></div>
+    <div class="ag"><div class="bg"></div><div class="lg">__CURSOR__</div><span>Cursor</span></div>
+    <div class="ag"><div class="bg"></div><div class="lg">__GEMINICLI__</div><span>Gemini CLI</span></div>
+    <div class="ag"><div class="bg"></div><div class="lg">__OPENCODE__</div><span>opencode</span></div>
+  </div>
+
+  <!-- routines -->
+  <div id="rl" class="abs lbl">Routines and flows</div>
+  <div class="rt" style="left:56px"><div class="ln"></div>
+    <div class="hd">08:00 digest</div>
+    <div class="d">unread chats, summarized</div></div>
+  <div class="rt" style="left:333px"><div class="ln"></div>
+    <div class="hd">Draft reply</div>
+    <div class="d">you approve before it sends</div></div>
+  <div class="rt" style="left:610px"><div class="ln"></div>
+    <div class="hd">Organize</div>
+    <div class="d">archive, pin, lists</div></div>
+  <div class="rt" style="left:887px"><div class="ln"></div>
+    <div class="hd">Voice call</div>
+    <div class="d">an agent speaks for you</div></div>
+
+  <!-- hero: confirmation gate -->
+  <div id="dim" class="abs"></div>
+  <div id="dlg" class="abs">
+    <div id="dh">__GROKBOT_20__<span>Grok Bot wants to send a reply</span></div>
+    <div id="dto" class="abs"><span style="color:#25d366">__WA_14__</span><span>To <b>Maya</b>, through the companion</span></div>
+    <div id="draft" class="abs"><span id="dtxt"></span><span id="caret"></span></div>
+    <div id="dfoot" class="abs"><div id="dnote">Nothing is sent until you approve.</div>
+      <div id="bcancel" class="btn">Cancel</div>
+      <div id="bok" class="btn"><div id="bokA">Approve <span class="k">↵</span></div>
+        <div id="bokB"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Approved</div></div>
+    </div>
+  </div>
+</div>
+<script>
+const T = 10;                       // loop length in seconds
+const $ = id => document.getElementById(id);
+const cl = x => Math.max(0, Math.min(1, x));
+const eo = x => 1 - Math.pow(1 - x, 3);
+const eio = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const mix = (a, b, k) => a + (b - a) * k;
+
+// pulses: comet that travels along a wire
+const NS = "http://www.w3.org/2000/svg";
+function mkPulse(wire, color) {
+  const src = $(wire), L = src.getTotalLength(), g = $("pulses"), parts = [];
+  [[46, .22, 2], [26, .5, 2.2], [10, 1, 2.6]].forEach(([tail, op, w]) => {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", src.getAttribute("d")); p.setAttribute("stroke", color);
+    p.setAttribute("stroke-width", w); p.setAttribute("stroke-opacity", op);
+    g.appendChild(p); parts.push([p, tail]);
+  });
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("r", 3.6); dot.setAttribute("fill", color); g.appendChild(dot);
+  return p => {
+    const on = p > 0 && p < 1;
+    parts.forEach(([el, tail]) => {
+      el.style.display = on ? "" : "none";
+      if (!on) return;
+      const head = p * (L + tail);
+      el.setAttribute("stroke-dasharray", `${tail} ${L + tail + 10}`);
+      el.setAttribute("stroke-dashoffset", tail - head);
+    });
+    const hd = p * (L + 46);
+    dot.style.display = on && hd <= L ? "" : "none";
+    if (on && hd <= L) { const pt = src.getPointAtLength(hd); dot.setAttribute("cx", pt.x); dot.setAttribute("cy", pt.y); }
+  };
+}
+const P1 = mkPulse("w1", "#f7f8f8"), P2 = mkPulse("w2", "#f7f8f8"), P3 = mkPulse("w3", "#f7f8f8");
+const P4 = mkPulse("w4", "#12b76a"), P5 = mkPulse("w5", "#12b76a");
+
+const narr = [...document.querySelectorAll(".narr")];
+const ags = [...document.querySelectorAll(".ag")], rts = [...document.querySelectorAll(".rt")];
+const STEPS = [0, 1.25, 2.8, 4.1, 6.75, T];          // narration windows
+const DRAFT = "Sure, 7:30 works. See you then.";
+
+window.render = function (t) {
+  const s = ((t % 1) + 1) % 1 * T;
+  const seg = (a, b) => cl((s - a) / (b - a));
+  const win = (a, b, fi = .22, fo = .22) => Math.min(seg(a, a + fi), 1 - seg(b - fo, b));
+  const out = 1 - seg(9.35, 9.8);                      // loop reset
+
+  // narration + step count
+  let cur = 0;
+  narr.forEach((n, i) => {
+    const a = STEPS[i], b = STEPS[i + 1];
+    const o = i === 4 ? Math.min(seg(a, a + .22), 1 - seg(9.55, 9.8)) : (i === 0 ? (s >= 9.8 ? seg(9.8, 10) : 1 - seg(b - .2, b)) : win(a, b, .22, .2));
+    n.style.opacity = o;
+    if (s >= a) cur = i;
+  });
+  if (s >= 9.8) cur = 0;
+  $("stepk").textContent = `${cur + 1} / 5`;
+
+  // phone
+  const ty = win(.15, .8, .15, .1);
+  $("typing").style.opacity = ty;
+  [...$("typing").children].forEach((d, i) => d.style.opacity = .35 + .65 * Math.max(0, Math.sin((s * 9) - i * 1.1)));
+  const bi = seg(.78, 1.1);
+  $("bin").style.opacity = cl(bi * 3) * out;
+  $("bin").style.transform = `scale(${mix(.94, 1, eo(bi))}) translateY(${(1 - out) * -8}px)`;
+  const bo = seg(8.05, 8.4);
+  $("bout").style.opacity = cl(bo * 3) * out;
+  $("bout").style.transform = `scale(${mix(.94, 1, eo(bo))}) translateY(${(1 - out) * -8}px)`;
+  $("ticks").setAttribute("stroke", s > 8.9 ? "#53bdeb" : "#86c9a8");
+
+  // inbound: phone -> WhatsApp Desktop -> wa -> agents
+  P1(seg(1.15, 1.75)); P2(seg(2.0, 2.6)); P3(seg(2.85, 3.4));
+  $("row1").querySelector(".hl").style.opacity = .55 * win(1.6, 2.7, .2, .5);
+
+  // core flashes: read arrives (2.55) and approved (6.6)
+  const f1 = seg(2.5, 3.1), f2 = seg(6.55, 7.2);
+  const f = f1 > 0 && f1 < 1 ? f1 : (f2 > 0 && f2 < 1 ? f2 : 0);
+  $("ring").style.opacity = f ? (1 - f) * .8 : 0;
+  $("ring").style.transform = `scale(${1 + eo(f) * .28})`;
+  $("ring").style.borderColor = f2 > 0 && f2 < 1 ? "#12b76a" : "#fff";
+  const bump = Math.sin(cl(seg(2.5, 2.9)) * Math.PI) + Math.sin(cl(seg(6.55, 6.95)) * Math.PI);
+  $("core").style.transform = `scale(${1 + .025 * bump})`;
+
+  // agents
+  ags.forEach((a, i) => {
+    const sw = win(3.25 + i * .07, 3.75 + i * .07, .12, .3);     // sweep: all six light up
+    const act = i === 0 ? Math.min(seg(3.5, 3.8), out) : 0;
+    a.querySelector(".bg").style.opacity = Math.max(sw * .8, act);
+    a.style.color = Math.max(sw, act) > .4 ? "#f7f8f8" : "";
+  });
+  $("st1").style.opacity = win(3.7, 4.3, .2, .15);
+  $("st2").style.opacity = win(4.3, 6.2, .15, .15);
+  $("st3").style.opacity = Math.min(seg(8.1, 8.3), out);
+
+  // gate pill under the core
+  const g1 = win(4.15, 6.15, .2, .15), g2 = Math.min(seg(6.15, 6.3), 1 - seg(8.9, 9.3));
+  $("gp1").style.opacity = g1; $("gp2").style.opacity = g2; $("gp0").style.opacity = 1 - Math.max(g1, g2);
+
+  // hero: confirmation dialog
+  const din = seg(4.1, 4.45), dout = seg(6.5, 6.8);
+  const dv = eo(din) * (1 - eio(dout));
+  $("dim").style.opacity = .72 * dv;
+  $("dlg").style.opacity = cl(din * 5) * (1 - cl(dout * 1.6));
+  $("dlg").style.transform = `translateY(${(1 - eo(din)) * 18 + eio(dout) * 10}px) scale(${mix(.94, 1, eo(din)) - .04 * eio(dout)})`;
+  const n = Math.round(cl((s - 4.55) / .85) * DRAFT.length);
+  $("dtxt").textContent = DRAFT.slice(0, n);
+  $("caret").style.opacity = n < DRAFT.length ? 1 : (Math.floor(s * 2.5) % 2 ? 1 : 0) * (s < 5.9 ? 1 : 0);
+  const press = Math.sin(seg(5.85, 6.1) * Math.PI);
+  const ok = seg(5.97, 6.1);
+  $("bok").style.transform = `scale(${1 - .03 * press})`;
+  $("bokB").style.opacity = ok; $("bokA").style.opacity = 1 - ok;
+
+  // outbound: wa -> companion -> phone (only after the OK)
+  P4(seg(6.85, 7.45)); P5(seg(7.55, 8.1));
+  const h2 = $("row2").querySelector(".hl");
+  h2.style.borderColor = "#12b76a"; h2.style.opacity = .8 * win(7.3, 8.3, .2, .5);
+
+  // the routine being shown (draft reply) is highlighted while its flow runs
+  const ron = win(2.6, 8.4, .25, .25);
+  const ch = v => Math.round(mix(v, 247, ron));
+  rts[1].querySelector(".hd").style.color = `rgb(${ch(138)},${ch(143)},${ch(152)})`;
+  rts[1].querySelector(".ln").style.background = `rgb(${ch(43)},${ch(45)},${ch(50)})`;
+};
+window.render(0);
+</script>
+</body></html>
