@@ -375,8 +375,8 @@ def test_cli_actions_and_calls(data_dir, capsys, monkeypatch):
     assert rc == 0 and out["done"] is True
     rc, out = _cli(capsys, "calls", "--missed")
     assert out["count"] == 1
-    rc, out = _cli(capsys, "lists")
-    assert out == {"count": 0, "lists": []}
+    rc, out = _cli(capsys, "lists")  # companion off: Desktop fallback
+    assert out["count"] == 0 and out["lists"] == [] and out["source"] == "desktop"
     rc, out = _cli(capsys, "chats", "--archived")
     assert rc == 0 and out["count"] == 0
 

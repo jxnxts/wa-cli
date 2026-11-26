@@ -105,7 +105,7 @@ wa search "meeting" --since 2026-11-20  # case and accent insensitive
 wa search "invoice" --chat "Alex"
 wa contacts "Maria"                     # name -> phone/jid
 wa calls --limit 20 [--missed]          # call history
-wa lists                                # chat lists (can be empty)
+wa lists                                # chat lists (from the companion when it is connected)
 ```
 
 - **Dates** (`--since`/`--until`) accept ISO (`2026-11-01`, `2026-11-01T10:00`, local time) or relative values (`30m`, `12h`, `7d`, `2w`). Output dates are ISO 8601 with the local offset.
@@ -200,7 +200,7 @@ Limits through the app UI:
 - The title of the item that unmutes a chat was not observed on a real account. `wa` accepts several variants. If the menu has another title, `unmute` fails with `action_failed` and lists the menu items.
 - On some Macs `ZWACHATPROPERTIES` is empty, so a mute can come back with `verified: false` even when it worked.
 
-### Chat lists (companion only, not validated on a real account yet)
+### Chat lists (companion only)
 
 ```sh
 WA_ALLOW_ACTIONS=1 wa list-create --name "Work" --confirm
@@ -209,7 +209,14 @@ WA_ALLOW_ACTIONS=1 wa list-remove --list "Work" --chat "+1…" --confirm
 WA_ALLOW_ACTIONS=1 wa list-delete --list "Work" --confirm
 ```
 
-`--list` accepts the name or the id shown by `wa lists`. A new list shows up in `wa lists` only after WhatsApp Desktop syncs.
+WhatsApp Desktop for Mac does not receive chat lists from the phone. Its `Labels.sqlite` stays empty and the sidebar shows no lists. The companion keeps its own copy instead. GoWA records every list and chat that reaches it through app-state events, and right after it connects it runs one full sync of the lists that already exist. `GET /wa-mac/lists` on GoWA returns them.
+
+- With the companion connected, `wa lists`, `wa_list_lists` and `--list` resolve against the companion's lists (`source: "companion"`). Deleted lists are left out.
+- Without the companion, they fall back to the Desktop database (`source: "desktop"`), which is usually empty.
+- `--list` accepts the name or the id shown by `wa lists`.
+- After each operation, `wa` polls the companion's list state for up to 5 s and reports `verified: true` once the change shows up there (`verified_by: "companion"`). WhatsApp Desktop is never used to confirm a list operation.
+
+Creating a list was tested on a real account (it showed up on the phone). Adding, removing and deleting have only run against simulators.
 
 ### Calls
 
@@ -267,7 +274,7 @@ Flow:
 
 The Mac becomes one more device under *Linked devices*, named `wa-mac`. GoWA, a WhatsApp Web client written in Go, makes the link. It is built from the public fork [jxnxts/go-whatsapp-web-multidevice](https://github.com/jxnxts/go-whatsapp-web-multidevice) (branch `wa-companion`).
 
-**Status.** Pairing and status were tested on a real account. Sending, actions, lists and the inbox through the companion only went through simulated tests. Treat them as experimental.
+**Status.** Pairing, status, creating a list and these chat actions were tested on a real account: archive, unarchive, pin, mute, unmute and mark unread. Unpin through the companion was accepted by GoWA, but WhatsApp Desktop kept the chat pinned, so it is not confirmed yet. Sending, the inbox and adding, removing and deleting lists only went through simulated tests. Treat them as experimental.
 
 ### Risks
 
@@ -337,12 +344,12 @@ Calls only go through the Desktop app UI.
 | `wa_search_messages` | text search | none |
 | `wa_find_contact` | name to phone/jid | none |
 | `wa_list_calls` | call history | none |
-| `wa_list_lists` | chat lists | none |
+| `wa_list_lists` | chat lists (from the companion when it is connected) | none |
 | `wa_send_message` | sends (text up to 2,000 characters); `via`, `reply_to` | `confirm` + `WA_ALLOW_SEND` |
 | `wa_chat_action` | archive, pin, mute, mark as unread; `via` | `confirm` + `WA_ALLOW_ACTIONS` |
 | `wa_companion_status` | is the companion connected? | none |
 | `wa_companion_inbox` | messages received in real time (does not mark them as read) | none |
-| `wa_list_create` / `wa_list_add` / `wa_list_remove` / `wa_list_delete` | lists through the companion (not validated) | `confirm` + `WA_ALLOW_ACTIONS` |
+| `wa_list_create` / `wa_list_add` / `wa_list_remove` / `wa_list_delete` | lists through the companion, confirmed against its list state | `confirm` + `WA_ALLOW_ACTIONS` |
 | `wa_call` / `wa_hangup` | call / hang up | `confirm` + `WA_ALLOW_CALLS` |
 | `wa_voice_call` | a call with the voice agent | `confirm` + `WA_ALLOW_CALLS` |
 
@@ -423,7 +430,8 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 - Chats with **Advanced Chat Privacy** are **not** filtered when reading yet (the flag in the database has not been identified).
 - Calling, hanging up, muting and the voice agent have not been tested on a real account yet.
 - The English menu titles come from the localization files (`en.lproj` in WhatsApp.app and in its SharedModules framework) and have not been tested on a real account. Other UI languages are not supported for desktop actions yet.
-- Lists through the companion, the "unavailable" presence and actions through the companion have **not** been tested on a real account yet. Through the app UI, creating or moving lists does not exist (there is no menu for it).
+- WhatsApp Desktop for Mac does not show chat lists. They only exist through the companion. Adding, removing and deleting lists and the "unavailable" presence have **not** been tested on a real account yet. Through the app UI, creating or moving lists does not exist (there is no menu for it).
+- Unpin through the companion is not confirmed. GoWA accepted it, but WhatsApp Desktop kept the chat pinned in the real test.
 - Groups accept sending through the app or the companion (by jid). Chat actions on a group only work through the companion.
 - Through the app UI, WhatsApp comes to the front for a moment for every send or action.
 - The companion inbox `--unread` is approximate (see section 5).
@@ -441,4 +449,8 @@ Allow only what you use: `WA_ALLOW_SEND=1`, `WA_ALLOW_ACTIONS=1` and/or `WA_ALLO
 | Calling, hanging up, muting and the voice agent | simulated tests only |
 | English WhatsApp UI | simulated tests only, titles taken from the localization files |
 | Companion pairing and status | tested on a real account |
-| Companion sending, actions, lists and inbox | experimental, simulated tests only |
+| Chat actions through the companion (archive, unarchive, pin, mute, unmute, mark unread) | tested on a real account |
+| Unpin through the companion | not confirmed (Desktop kept the chat pinned) |
+| Creating a list through the companion | tested on a real account |
+| Adding, removing and deleting lists | simulated tests only |
+| Companion sending and inbox | experimental, simulated tests only |

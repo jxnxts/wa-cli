@@ -565,37 +565,108 @@ def chat_action(client: GowaClient, wa: WhatsApp, to: str, action: str) -> dict:
             "confirmation": {"by": "gowa_app_state", "gowa": res}}
 
 
-# ------------------------------------------------------------ listas (etiquetas)
+# ------------------------------------------------------------ chat lists (labels)
+#
+# WhatsApp Desktop for Mac does not receive the lists from the phone (its
+# Labels.sqlite stays empty), so with the companion connected the lists come
+# from GoWA (GET /wa-mac/lists), which keeps them from the app-state events.
+# The Desktop database is only a fallback. Every list operation is confirmed
+# against the companion's state (the echo of the patch), never the Desktop.
+
+LIST_CONFIRM_TIMEOUT = 5.0
+LIST_POLL = 0.5
 
 
-def _lists(wa: WhatsApp) -> list[dict]:
-    return wa.list_lists()["lists"]
+def _companion_client(client: GowaClient | None) -> GowaClient | None:
+    return client if client is not None and is_connected(client) else None
 
 
-def resolve_list(wa: WhatsApp, ref: str) -> dict:
+def companion_lists(client: GowaClient) -> tuple[list[dict], str | None]:
+    """The lists GoWA knows (deleted ones included) and the time of its last full sync."""
+    try:
+        res = client.results("GET", "/wa-mac/lists") or {}
+    except CompanionFailed as exc:
+        if " 404" in exc.message:
+            raise CompanionFailed(
+                "This GoWA build has no /wa-mac/lists. Rebuild it with scripts/build-gowa.sh and run "
+                "`wa companion service start`."
+            ) from None
+        raise
+    out = []
+    for item in res.get("lists") or []:
+        out.append({
+            "id": str(item.get("id")),
+            "name": item.get("name"),
+            "type": item.get("type"),
+            "active": item.get("active"),
+            "deleted": bool(item.get("deleted")),
+            "jids": list(item.get("jids") or []),
+        })
+    return out, res.get("synced_at")
+
+
+def _with_members(wa: WhatsApp, item: dict) -> dict:
+    out = {k: v for k, v in item.items() if k != "jids"}
+    out["members"] = [{"jid": j, "name": wa.contact_name(j)} for j in item.get("jids") or []]
+    return out
+
+
+def _known_lists(wa: WhatsApp, client: GowaClient | None) -> tuple[list[dict], str]:
+    """Lists to resolve names and ids against: the companion's when it is connected."""
+    live = _companion_client(client)
+    if live is not None:
+        lists, _ = companion_lists(live)
+        return lists, "companion"
+    return wa.list_lists()["lists"], "desktop"
+
+
+def lists(wa: WhatsApp, client: GowaClient | None = None) -> dict:
+    """The account's chat lists: from the companion when it is connected, else from the Desktop database."""
+    live = _companion_client(client)
+    if live is not None:
+        items, synced_at = companion_lists(live)
+        out_lists = [_with_members(wa, i) for i in items if not i["deleted"]]
+        out = {"source": "companion", "synced_at": synced_at, "count": len(out_lists), "lists": out_lists}
+        if not synced_at:
+            out["note"] = "The companion has not finished its first full list sync; lists made before pairing may be missing."
+        return out
+    out = wa.list_lists()
+    out["source"] = "desktop"
+    out["note"] = ("WhatsApp Desktop for Mac does not receive lists from the phone, so this can be empty or stale. "
+                   "Connect the companion to see the real lists.")
+    return out
+
+
+def resolve_list(wa: WhatsApp, ref: str, client: GowaClient | None = None) -> dict:
     ref = (ref or "").strip()
     if not ref:
         raise InvalidArgument("give the list (name or id)")
-    lists = _lists(wa)
-    for item in lists:
+    known, source = _known_lists(wa, client)
+    known = [i for i in known if not i.get("deleted")]
+    for item in known:
         if str(item.get("id")) == ref:
-            return item
+            return {**item, "source": source}
     from .db import normalize
 
-    hits = [i for i in lists if normalize(i.get("name")) == normalize(ref)]
+    hits = [i for i in known if normalize(i.get("name")) == normalize(ref)]
     if len(hits) == 1:
-        return hits[0]
+        return {**hits[0], "source": source}
     if len(hits) > 1:
         from .db import AmbiguousError
 
         raise AmbiguousError(f"more than one list is called {ref!r}; use the id",
-                             candidates=[{"id": h["id"], "name": h["name"]} for h in hits])
-    raise NotFoundError(f"list not found: {ref} (lists come from the Desktop Labels.sqlite)")
+                             candidates=[{"id": h["id"], "name": h["name"]} for h in hits], source=source)
+    where = "the companion" if source == "companion" else "the Desktop database (connect the companion for the real lists)"
+    raise NotFoundError(f"list not found: {ref} (lists come from {where})", source=source)
 
 
-def next_list_id(wa: WhatsApp) -> str:
+def next_list_id(wa: WhatsApp, client: GowaClient | None = None) -> str:
     ids = []
-    for item in _lists(wa):
+    candidates = list(wa.list_lists()["lists"])
+    live = _companion_client(client)
+    if live is not None:
+        candidates += companion_lists(live)[0]  # deleted ones too: their ids stay taken
+    for item in candidates:
         try:
             ids.append(int(str(item.get("id"))))
         except ValueError:
@@ -605,35 +676,82 @@ def next_list_id(wa: WhatsApp) -> str:
 
 
 def list_plan(op: str, **fields) -> dict:
-    return {"done": False, "mode": "plan", "op": op, "via": "companion", "validated": False,
-            "note": "Lists through the companion have NOT been validated on a real account yet.", **fields}
+    return {"done": False, "mode": "plan", "op": op, "via": "companion", **fields}
 
 
-def list_create(client: GowaClient, wa: WhatsApp, name: str) -> dict:
+def _member_keys(wa: WhatsApp, target: dict) -> set[str]:
+    keys = {target["jid"]}
+    if target.get("kind") == "person" and target.get("phone"):
+        keys.update(wa.jids_for_phone(phone_digits(target["phone"])))
+    return keys
+
+
+def _confirm(client: GowaClient, check: Callable[[list[dict]], bool], sleep: Callable[[float], None],
+             clock: Callable[[], float]) -> bool:
+    """Polls GET /wa-mac/lists until check() holds (the echo of the patch arrived) or the timeout."""
+    deadline = clock() + LIST_CONFIRM_TIMEOUT
+    while True:
+        try:
+            if check(companion_lists(client)[0]):
+                return True
+        except WAError:
+            pass
+        if clock() >= deadline:
+            return False
+        sleep(LIST_POLL)
+
+
+def _by_id(items: list[dict], list_id: str) -> dict | None:
+    return next((i for i in items if str(i.get("id")) == str(list_id)), None)
+
+
+def _result(out: dict, verified: bool) -> dict:
+    out["verified"] = verified
+    out["verified_by"] = "companion"
+    if not verified:
+        out["note"] = (f"GoWA accepted the change, but its list state did not show it within "
+                       f"{int(LIST_CONFIRM_TIMEOUT)} s. Check the lists on the phone before retrying.")
+    return out
+
+
+def list_create(client: GowaClient, wa: WhatsApp, name: str, sleep=time.sleep, clock=time.time) -> dict:
     name = (name or "").strip()
     if not name:
         raise InvalidArgument("give the list name")
-    label_id = next_list_id(wa)
+    label_id = next_list_id(wa, client)
     res = client.results("POST", "/label", body={"label_id": label_id, "name": name, "type": "CUSTOM"}) or {}
-    return {"done": True, "mode": "executed", "op": "list_create", "via": "companion", "list": {"id": label_id, "name": name},
-            "gowa": res, "validated": False}
+    ok = _confirm(client, lambda items: bool((i := _by_id(items, label_id)) and i["name"] == name and not i["deleted"]),
+                  sleep, clock)
+    return _result({"done": True, "mode": "executed", "op": "list_create", "via": "companion",
+                    "list": {"id": label_id, "name": name}, "gowa": res}, ok)
 
 
-def list_member(client: GowaClient, wa: WhatsApp, list_ref: str, chat: str, add: bool) -> dict:
-    item = resolve_list(wa, list_ref)
+def list_member(client: GowaClient, wa: WhatsApp, list_ref: str, chat: str, add: bool,
+                sleep=time.sleep, clock=time.time) -> dict:
+    item = resolve_list(wa, list_ref, client)
     target = resolve_target(wa, chat)
     res = client.results("POST", f"/chat/{quote(target['jid'], safe='@.')}/label",
                          body={"label_id": str(item["id"]), "labeled": add}) or {}
-    return {"done": True, "mode": "executed", "op": "list_add" if add else "list_remove", "via": "companion",
-            "list": {"id": item["id"], "name": item.get("name")}, "chat": target, "gowa": res, "validated": False}
+    keys = _member_keys(wa, target)
+
+    def check(items: list[dict]) -> bool:
+        cur = _by_id(items, item["id"])
+        present = bool(cur and keys & set(cur["jids"]))
+        return present if add else not present
+
+    ok = _confirm(client, check, sleep, clock)
+    return _result({"done": True, "mode": "executed", "op": "list_add" if add else "list_remove", "via": "companion",
+                    "list": {"id": item["id"], "name": item.get("name"), "source": item["source"]},
+                    "chat": target, "gowa": res}, ok)
 
 
-def list_delete(client: GowaClient, wa: WhatsApp, list_ref: str) -> dict:
-    item = resolve_list(wa, list_ref)
+def list_delete(client: GowaClient, wa: WhatsApp, list_ref: str, sleep=time.sleep, clock=time.time) -> dict:
+    item = resolve_list(wa, list_ref, client)
     res = client.results("POST", "/label", body={"label_id": str(item["id"]), "name": item.get("name") or "",
                                                  "deleted": True, "type": "CUSTOM"}) or {}
-    return {"done": True, "mode": "executed", "op": "list_delete", "via": "companion",
-            "list": {"id": item["id"], "name": item.get("name")}, "gowa": res, "validated": False}
+    ok = _confirm(client, lambda items: (cur := _by_id(items, item["id"])) is None or cur["deleted"], sleep, clock)
+    return _result({"done": True, "mode": "executed", "op": "list_delete", "via": "companion",
+                    "list": {"id": item["id"], "name": item.get("name"), "source": item["source"]}, "gowa": res}, ok)
 
 
 def list_op(
@@ -645,6 +763,8 @@ def list_op(
     name: str | None = None,
     list_ref: str | None = None,
     chat: str | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.time,
 ) -> dict:
     """Single entry point for the list tools: a plan without confirm; runs with confirm + WA_ALLOW_ACTIONS."""
     env = os.environ if env is None else env
@@ -652,12 +772,14 @@ def list_op(
     if op == "create":
         plan = list_plan("list_create", name=name, list_id=None)
     elif op in ("add", "remove"):
-        item = resolve_list(wa, list_ref or "")
-        plan = list_plan(f"list_{op}", list={"id": item["id"], "name": item.get("name")},
+        item = resolve_list(wa, list_ref or "", client)
+        plan = list_plan(f"list_{op}", list={"id": item["id"], "name": item.get("name"), "source": item["source"]},
                          chat=resolve_target(wa, chat or ""))
     elif op == "delete":
-        item = resolve_list(wa, list_ref or "")
-        plan = list_plan("list_delete", list={"id": item["id"], "name": item.get("name"), "members": len(item.get("members") or [])})
+        item = resolve_list(wa, list_ref or "", client)
+        members = item.get("jids") if item["source"] == "companion" else item.get("members")
+        plan = list_plan("list_delete", list={"id": item["id"], "name": item.get("name"), "source": item["source"],
+                                              "members": len(members or [])})
     else:
         raise InvalidArgument(f"invalid list operation: {op}")
     plan["allowed_by_env"] = allowed
@@ -670,10 +792,10 @@ def list_op(
     if not is_connected(client):
         raise CompanionUnavailable("Lists only work through the companion, and it is not connected (`wa companion status`).")
     if op == "create":
-        return list_create(client, wa, name or "")
+        return list_create(client, wa, name or "", sleep=sleep, clock=clock)
     if op in ("add", "remove"):
-        return list_member(client, wa, list_ref or "", chat or "", add=(op == "add"))
-    return list_delete(client, wa, list_ref or "")
+        return list_member(client, wa, list_ref or "", chat or "", add=(op == "add"), sleep=sleep, clock=clock)
+    return list_delete(client, wa, list_ref or "", sleep=sleep, clock=clock)
 
 
 # ------------------------------------------------------------ inbox
@@ -745,5 +867,5 @@ def choose_via(via: str, client_factory: Callable[[], GowaClient]) -> tuple[str,
 
 __all__ = [
     "COMPANION_ACTIONS", "VIAS", "GowaClient", "CompanionUnavailable", "CompanionFailed", "RateLimited",
-    "status", "link", "logout", "send", "chat_action", "inbox", "list_op", "choose_via", "mask_phone",
+    "status", "link", "logout", "send", "chat_action", "inbox", "list_op", "lists", "choose_via", "mask_phone",
 ]

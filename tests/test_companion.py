@@ -9,12 +9,12 @@ import subprocess
 
 import pytest
 
-from conftest import ANA_JID, BRUNO_PHONE, GROUP_JID
+from conftest import ANA_JID, BRUNO_LID, BRUNO_PHONE, GROUP_JID
 from fake_gowa import SECRET, FakeGowa
 from fake_whatsapp import FakeClock
 from wa import cli, companion as comp, mcp_server, routing, service
 from wa.core import WhatsApp
-from wa.db import ActionRefused, InvalidArgument, SendRefused
+from wa.db import ActionRefused, InvalidArgument, NotFoundError, SendRefused
 
 ALLOW = {"WA_ALLOW_SEND": "1", "WA_ALLOW_ACTIONS": "1"}
 
@@ -302,34 +302,104 @@ def _add_list(data_dir, label_id, name):
     c.close()
 
 
-def test_list_create_plan_gate_and_id(wa, data_dir, client, gowa, tmp_path):
-    plan = comp.list_op("create", wa, confirm=False, env=_env(tmp_path), name="Work")
-    assert plan["mode"] == "plan" and plan["validated"] is False and not gowa.calls
+def test_list_create_plan_gate_and_confirm_by_echo(wa, data_dir, client, gowa, tmp_path):
+    plan = comp.list_op("create", wa, confirm=False, env=_env(tmp_path), client=client, name="Work")
+    assert plan["mode"] == "plan" and not gowa.posts()
     with pytest.raises(ActionRefused):
         comp.list_op("create", wa, confirm=True, env=_env(tmp_path), client=client, name="Work")
     out = comp.list_op("create", wa, confirm=True, env=_env(tmp_path, **ALLOW), client=client, name="Work")
-    assert out["list"] == {"id": "100", "name": "Work"} and out["validated"] is False
+    assert out["list"] == {"id": "100", "name": "Work"}
+    assert out["verified"] is True and out["verified_by"] == "companion"
     assert gowa.posts("/label")[0]["body"] == {"label_id": "100", "name": "Work", "type": "CUSTOM"}
-    _add_list(data_dir, 150, "Family")
+
+
+def test_next_list_id_counts_companion_and_desktop_ids(wa, data_dir, client, gowa):
+    gowa.add_list("130", "Old", deleted=True)  # a deleted id stays taken
+    _add_list(data_dir, 120, "Desktop only")
     with WhatsApp() as w:
-        assert comp.next_list_id(w) == "151"
+        assert comp.next_list_id(w, client) == "131"
+        assert comp.next_list_id(w) == "121"  # without the companion: Desktop ids only
 
 
-def test_list_add_remove_delete(wa, data_dir, client, gowa, tmp_path):
-    _add_list(data_dir, 120, "Clients")
+def test_lists_come_from_the_companion(wa, data_dir, client, gowa):
+    gowa.add_list("100", "Work", jids=[ANA_JID, GROUP_JID])
+    gowa.add_list("101", "Gone", deleted=True)
+    _add_list(data_dir, 150, "Stale desktop list")
+    with WhatsApp() as w:
+        out = comp.lists(w, client)
+    assert out["source"] == "companion" and out["count"] == 1 and out["synced_at"]
+    work = out["lists"][0]
+    assert work["id"] == "100" and work["name"] == "Work" and work["deleted"] is False
+    assert {m["jid"] for m in work["members"]} == {ANA_JID, GROUP_JID}
+    assert next(m for m in work["members"] if m["jid"] == ANA_JID)["name"] == "Ana Lúcia Souza"
+
+
+def test_lists_note_when_never_synced(wa, client, gowa):
+    gowa.lists_synced_at = None
+    out = comp.lists(wa, client)
+    assert out["source"] == "companion" and "first full list sync" in out["note"]
+
+
+def test_lists_fall_back_to_desktop(wa, data_dir, gowa):
+    gowa.connected = False
+    _add_list(data_dir, 150, "Desktop list")
+    with WhatsApp() as w:
+        out = comp.lists(w, comp.GowaClient(gowa.url, SECRET))
+    assert out["source"] == "desktop" and out["lists"][0]["name"] == "Desktop list"
+    assert "does not receive lists" in out["note"]
+
+
+def test_list_add_remove_delete_resolve_through_companion(wa, data_dir, client, gowa, tmp_path):
+    gowa.add_list("100", "teste-wa")
+    gowa.add_list("90", "Gone", deleted=True)
     env = _env(tmp_path, **ALLOW)
     with WhatsApp() as w:
-        out = comp.list_op("add", w, confirm=True, env=env, client=client, list_ref="clients", chat=ANA_JID)
-        assert out["list"]["id"] == 120
-        comp.list_op("remove", w, confirm=True, env=env, client=client, list_ref="120", chat=GROUP_JID)
-        comp.list_op("delete", w, confirm=True, env=env, client=client, list_ref="Clients")
-        with pytest.raises(Exception) as exc:
-            comp.list_op("add", w, confirm=False, env=env, list_ref="does not exist", chat=ANA_JID)
-        assert getattr(exc.value, "code", "") == "not_found"
+        out = comp.list_op("add", w, confirm=True, env=env, client=client, list_ref="teste-wa", chat=ANA_JID)
+        assert out["list"] == {"id": "100", "name": "teste-wa", "source": "companion"} and out["verified"] is True
+        out = comp.list_op("add", w, confirm=True, env=env, client=client, list_ref="100", chat=GROUP_JID)
+        assert out["verified"] is True
+        assert gowa.lists["100"]["jids"] == sorted([ANA_JID, GROUP_JID])
+        out = comp.list_op("remove", w, confirm=True, env=env, client=client, list_ref="100", chat=GROUP_JID)
+        assert out["verified"] is True and gowa.lists["100"]["jids"] == [ANA_JID]
+        plan = comp.list_op("delete", w, confirm=False, env=env, client=client, list_ref="teste-wa")
+        assert plan["list"] == {"id": "100", "name": "teste-wa", "source": "companion", "members": 1}
+        out = comp.list_op("delete", w, confirm=True, env=env, client=client, list_ref="teste-wa")
+        assert out["verified"] is True and gowa.lists["100"]["deleted"] is True
+        for ref in ("does not exist", "Gone", "90", "teste-wa"):  # deleted lists no longer resolve
+            with pytest.raises(NotFoundError) as exc:
+                comp.list_op("add", w, confirm=False, env=env, client=client, list_ref=ref, chat=ANA_JID)
+            assert exc.value.details["source"] == "companion"
     posts = gowa.posts()
-    assert posts[0]["path"] == f"/chat/{ANA_JID}/label" and posts[0]["body"] == {"label_id": "120", "labeled": True}
-    assert posts[1]["path"] == f"/chat/{GROUP_JID}/label" and posts[1]["body"]["labeled"] is False
-    assert posts[2]["body"] == {"label_id": "120", "name": "Clients", "deleted": True, "type": "CUSTOM"}
+    assert posts[0]["path"] == f"/chat/{ANA_JID}/label" and posts[0]["body"] == {"label_id": "100", "labeled": True}
+    assert posts[2]["path"] == f"/chat/{GROUP_JID}/label" and posts[2]["body"]["labeled"] is False
+    assert posts[3]["body"] == {"label_id": "100", "name": "teste-wa", "deleted": True, "type": "CUSTOM"}
+
+
+def test_list_member_matches_the_lid_form_of_a_person(wa, client, gowa, tmp_path):
+    # GoWA may store a member by its LID; the person's LID counts as the same chat.
+    gowa.add_list("100", "Work", jids=[BRUNO_LID])
+    gowa.list_echo = False
+    clock = FakeClock()
+    out = comp.list_op("remove", wa, confirm=True, env=_env(tmp_path, **ALLOW), client=client,
+                       list_ref="Work", chat="bruno", sleep=clock.sleep, clock=clock)
+    assert out["verified"] is False  # still listed under the LID: the removal was not seen
+
+
+def test_list_not_verified_without_echo(wa, client, gowa, tmp_path):
+    gowa.add_list("100", "Work")
+    gowa.list_echo = False
+    clock = FakeClock()
+    out = comp.list_op("add", wa, confirm=True, env=_env(tmp_path, **ALLOW), client=client,
+                       list_ref="Work", chat=ANA_JID, sleep=clock.sleep, clock=clock)
+    assert out["done"] is True and out["verified"] is False and "did not show it" in out["note"]
+    assert sum(clock.sleeps) <= comp.LIST_CONFIRM_TIMEOUT + comp.LIST_POLL
+
+
+def test_desktop_list_fallback_in_plan(wa, data_dir, tmp_path):
+    _add_list(data_dir, 120, "Clients")
+    with WhatsApp() as w:
+        plan = comp.list_op("add", w, confirm=False, env=_env(tmp_path), list_ref="clients", chat=ANA_JID)
+    assert plan["list"]["id"] == 120 and plan["list"]["source"] == "desktop"
 
 
 def test_list_needs_connected_companion(wa, gowa, tmp_path):
@@ -395,7 +465,9 @@ def test_cli_send_and_action_via(data_dir, use_gowa, gowa, capsys, monkeypatch):
     rc, out, _ = _cli(capsys, "list-create", "--name", "Trip")
     assert rc == 0 and out["mode"] == "plan"
     rc, out, _ = _cli(capsys, "list-create", "--name", "Trip", "--confirm")
-    assert rc == 0 and out["done"] is True
+    assert rc == 0 and out["done"] is True and out["verified"] is True
+    rc, out, _ = _cli(capsys, "lists")
+    assert rc == 0 and out["source"] == "companion" and out["lists"][0]["name"] == "Trip"
 
 
 def test_mcp_tools(data_dir, use_gowa, gowa, monkeypatch):
@@ -412,7 +484,10 @@ def test_mcp_tools(data_dir, use_gowa, gowa, monkeypatch):
     assert mcp_server.wa_list_create("Groceries", confirm=True)["error"] == "action_refused"
     monkeypatch.setenv("WA_ALLOW_ACTIONS", "1")
     assert mcp_server.wa_list_create("Groceries", confirm=True)["done"] is True
-    assert mcp_server.wa_list_add("100", ANA_JID)["error"] == "not_found"  # the list is not in the Desktop database yet
+    out = mcp_server.wa_list_add("100", ANA_JID, confirm=True)  # resolved through the companion
+    assert out["done"] is True and out["verified"] is True and out["list"]["source"] == "companion"
+    listed = mcp_server.wa_list_lists()
+    assert listed["source"] == "companion" and listed["lists"][0]["members"][0]["jid"] == ANA_JID
 
 
 def test_mcp_descriptions_keep_untrusted_warning():
@@ -499,3 +574,10 @@ def test_send_timeout_warns_possibly_sent(wa, tmp_path):
     with pytest.raises(comp.CompanionUnavailable) as exc:
         comp.send(dead, wa, "bruno", "hi", env=_env(tmp_path))
     assert exc.value.details["possibly_sent"] is True and "MAY" in exc.value.message
+
+
+def test_old_gowa_without_lists_endpoint_says_rebuild(wa, client, gowa):
+    gowa.fail["/wa-mac/lists"] = (404, {"code": "NOT_FOUND", "message": "/wa-mac/lists"})
+    with pytest.raises(comp.CompanionFailed) as exc:
+        comp.lists(wa, client)
+    assert "build-gowa.sh" in exc.value.message

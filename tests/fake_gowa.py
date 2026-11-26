@@ -25,6 +25,10 @@ class FakeGowa:
         self.pair = {"state": "idle"}
         self.calls: list[dict] = []
         self.inbox_messages: list[dict] = []
+        # Lists as GoWA keeps them from the app-state events (label id -> list).
+        self.lists: dict[str, dict] = {}
+        self.list_echo = True  # False: GoWA accepts the patch but the echo never arrives
+        self.lists_synced_at: str | None = "2026-11-26T12:00:00Z"
         self.fail: dict[str, tuple[int, dict]] = {}  # caminho -> (status, corpo)
         self.pair_after_polls: int | None = None  # pairs after N status checks
         self.fail_pair_after_polls: int | None = None
@@ -110,16 +114,41 @@ class FakeGowa:
         if path == "/send/message" and method == "POST":
             self._counter += 1
             return self.ok(h, {"message_id": f"3EB0FAKE{self._counter:04d}", "status": "Message sent"})
+        if path.startswith("/chat/") and path.endswith("/label") and method == "POST":
+            body = call["body"] or {}
+            jid = path.split("/")[2]
+            if self.list_echo:
+                item = self.lists.setdefault(str(body["label_id"]), self.new_list(str(body["label_id"]), ""))
+                jids = set(item["jids"])
+                (jids.add if body.get("labeled") else jids.discard)(jid)
+                item["jids"] = sorted(jids)
+            return self.ok(h, {"chat_jid": jid, **body})
         if path.startswith("/chat/") and method == "POST":
             return self.ok(h, {"chat_jid": path.split("/")[2], **(call["body"] or {})})
         if path == "/label" and method == "POST":
-            return self.ok(h, call["body"])
+            body = call["body"] or {}
+            if self.list_echo:
+                item = self.lists.setdefault(str(body["label_id"]), self.new_list(str(body["label_id"]), ""))
+                item.update(name=body.get("name") or item["name"], type=body.get("type") or "CUSTOM",
+                            deleted=bool(body.get("deleted")))
+            return self.ok(h, body)
+        if path == "/wa-mac/lists" and method == "GET":
+            items = sorted(self.lists.values(), key=lambda i: int(i["id"]))
+            return self.ok(h, {"count": len(items), "lists": items, "synced_at": self.lists_synced_at})
         if path == "/wa-mac/inbox":
             return self.ok(h, {"since": call["query"].get("since"), "count": len(self.inbox_messages),
                                "messages": self.inbox_messages})
         return h._send(404, {"code": "NOT_FOUND", "message": path})
 
     # ------------------------------------------------------------ util
+
+    @staticmethod
+    def new_list(label_id: str, name: str, jids=(), deleted: bool = False) -> dict:
+        return {"id": label_id, "name": name, "type": "CUSTOM", "color": 0, "order_index": 0, "active": True,
+                "deleted": deleted, "jids": sorted(jids), "updated_at": "2026-11-26T12:00:00Z"}
+
+    def add_list(self, label_id: str, name: str, jids=(), deleted: bool = False) -> None:
+        self.lists[label_id] = self.new_list(label_id, name, jids, deleted)
 
     def __enter__(self):
         self.thread.start()

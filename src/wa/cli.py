@@ -165,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--missed", action="store_true", help="missed only")
     _common_out(p)
 
-    p = sub.add_parser("lists", help="chat lists (Labels)")
+    p = sub.add_parser("lists", help="chat lists (from the companion when it is connected; WhatsApp Desktop does not show them)")
     _common_out(p)
 
     p = sub.add_parser("voice-call", help="call and let the voice agent talk (--confirm and WA_ALLOW_CALLS=1)")
@@ -291,7 +291,7 @@ def run(argv: list[str] | None = None) -> int:
                                            desktop_action=chat_action)
             elif args.cmd in ("list-create", "list-add", "list-remove", "list-delete"):
                 op = args.cmd.split("-", 1)[1]
-                data = comp.list_op(op, wa, confirm=args.confirm, client=None if not args.confirm else _companion_factory(),
+                data = comp.list_op(op, wa, confirm=args.confirm, client=_companion_factory(),
                                     name=getattr(args, "name", None), list_ref=getattr(args, "list_ref", None),
                                     chat=getattr(args, "chat", None))
             elif args.cmd == "call":
@@ -306,7 +306,7 @@ def run(argv: list[str] | None = None) -> int:
             elif args.cmd == "calls":
                 data = wa.list_calls(limit=args.limit, missed=args.missed)
             elif args.cmd == "lists":
-                data = wa.list_lists()
+                data = comp.lists(wa, _companion_factory())
             else:  # pragma: no cover
                 raise SystemExit(2)
     except WAError as exc:

@@ -5,6 +5,7 @@ test case- and accent-insensitive search."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -247,6 +248,22 @@ def _isolate_companion(tmp_path, monkeypatch):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(cli, "_companion_factory", lambda: _NoCompanion())
     monkeypatch.setattr(mcp_server, "_companion_factory", lambda: _NoCompanion())
+
+    # A client built from an env dict without WA_GOWA_URL must not reach a real GoWA on
+    # this Mac or read the real Keychain.
+    import subprocess
+
+    from wa import companion
+
+    real_default_client = companion.default_client
+
+    def safe_default_client(env=None, runner=None):
+        env = dict(os.environ if env is None else env)
+        env.setdefault("WA_GOWA_URL", "http://127.0.0.1:9")
+        no_keychain = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 44, stdout="", stderr="")  # noqa: E731
+        return real_default_client(env, runner or no_keychain)
+
+    monkeypatch.setattr(companion, "default_client", safe_default_client)
 
 
 @pytest.fixture

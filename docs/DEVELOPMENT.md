@@ -59,6 +59,8 @@ The schema is not documented and can change in any release.
 
 GoWA runs as the LaunchAgent `local.wa-mac.gowa`, listens only on `127.0.0.1` and requires Basic Auth. The password lives in the Keychain.
 
+WhatsApp Desktop for Mac does not receive chat lists, so the fork keeps them in `storages/wamac_lists.json`, fed by the `LabelEdit` and `LabelAssociationChat` app-state events (including the echo of its own patches). Lists made before pairing only arrive in a full sync of the `regular` app-state collection, which whatsmeow does not turn into events by default. The fork runs that sync with events enabled once after the device connects, and on demand through `POST /wa-mac/lists/resync` or `GET /wa-mac/lists?resync=true`. `wa` reads `GET /wa-mac/lists` and confirms each list operation there.
+
 ## README animation
 
 ```sh

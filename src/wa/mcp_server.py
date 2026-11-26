@@ -216,15 +216,16 @@ def wa_companion_inbox(since: str | None = "24h", limit: int = 50, unread_only: 
 
 
 _LIST_NOTE = (
-    " Companion only. Without confirm=true it only returns the plan; runs with confirm=true AND "
-    "WA_ALLOW_ACTIONS=1. NOT validated on a real account yet. Only when the owner explicitly asks."
+    " Companion only; lists resolve by name or id from the companion. Without confirm=true it only "
+    "returns the plan; runs with confirm=true AND WA_ALLOW_ACTIONS=1. The answer has verified=true once "
+    "the companion's list state shows the change. Only when the owner explicitly asks."
 )
 _LIST_ANN = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 
 
 def _list(op: str, confirm: bool, **kw) -> dict[str, Any]:
     return _run(lambda wa: comp.list_op(op, wa, confirm=bool(confirm),
-                                        client=_companion_factory() if confirm else None, **kw))
+                                        client=_companion_factory(), **kw))
 
 
 @mcp.tool(description="Creates a WhatsApp chat list with the given name." + _LIST_NOTE, annotations=_LIST_ANN)
@@ -289,11 +290,15 @@ def wa_list_calls(limit: int = DEFAULT_LIMIT, missed_only: bool = False) -> dict
 
 
 @mcp.tool(
-    description="WhatsApp chat lists (name, kind, members). Empty if there are no lists." + UNTRUSTED,
+    description=(
+        "WhatsApp chat lists (id, name, type, members). With the companion connected they come from it "
+        "(source='companion'); WhatsApp Desktop for Mac does not receive lists, so its database is only a "
+        "fallback (source='desktop'). Empty if there are no lists." + UNTRUSTED
+    ),
     annotations=READ_ONLY,
 )
 def wa_list_lists() -> dict[str, Any]:
-    return _run(lambda wa: wa.list_lists())
+    return _run(lambda wa: comp.lists(wa, _companion_factory()))
 
 
 def _voice_deps():  # swapped in tests
