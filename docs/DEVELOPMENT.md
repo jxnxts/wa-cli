@@ -34,6 +34,7 @@ src/wa/voice.py       voice agent (Realtime API, BlackHole, transcript)
 src/wa/cli.py         the `wa` CLI
 src/wa/mcp_server.py  the MCP server (`wa-mcp`)
 tests/                synthetic databases and simulators
+skills/               Agent Skills that teach an agent to use wa (SKILL.md per folder)
 ```
 
 ## How reads stay read-only

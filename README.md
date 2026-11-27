@@ -92,6 +92,24 @@ For clients configured with JSON, such as Claude Desktop and Cursor:
 
 With an empty `env` the server can only read. Add `"WA_ALLOW_SEND": "1"` to let the agent send, and it still has to pass `confirm=true` each time. The guide lists [where each client keeps its config](docs/GUIDE.md#7-register-the-server-in-an-agent).
 
+## Agent skills
+
+The `skills/` folder has four skills in the Agent Skills format (a folder with a `SKILL.md`). They teach an agent how to use `wa` and when to stop and ask you.
+
+| Skill | What it does |
+|---|---|
+| `whatsapp-mac` | reads, searches and opens media, sends with your approval, runs chat actions, lists and calls, and explains each error |
+| `whatsapp-war-room` | sorts recent chats into a local HTML kanban with priorities, next actions and draft replies |
+| `whatsapp-lists` | proposes a chat list for each chat and applies only what you approve |
+| `whatsapp-routines` | sets up scheduled summaries, follow-ups and an opt-in auto-reply with quiet hours and send spacing |
+
+To install them, copy or link each folder into your agent's skills folder, such as `~/.claude/skills/` for Claude Code or `~/.agents/skills/` for agents that read that one:
+
+```sh
+mkdir -p ~/.claude/skills
+for s in skills/*; do ln -s "$PWD/$s" ~/.claude/skills/; done
+```
+
 ## Caveats
 
 - **Not affiliated.** This project is not affiliated with, authorized or endorsed by WhatsApp or Meta. You are responsible for how you use it, including the [WhatsApp Terms of Service](https://www.whatsapp.com/legal/terms-of-service), data protection laws such as the GDPR or the LGPD, and the privacy of the people you talk to.
