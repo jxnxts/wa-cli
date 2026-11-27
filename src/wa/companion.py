@@ -532,6 +532,7 @@ def resolve_target(wa: WhatsApp, to: str, allow_groups: bool = True) -> dict:
     if t.endswith("@broadcast") or t.endswith("@newsletter"):
         raise InvalidArgument("broadcast lists, status and channels are not supported")
     cands: list[str] = []
+    by_name_only: str | None = None
     if "@" in t:
         cands.append(t)  # exactly what was asked for
         try:
@@ -549,33 +550,41 @@ def resolve_target(wa: WhatsApp, to: str, allow_groups: bool = True) -> dict:
         if not looks_like_phone(t):  # a name: the chat with that name, if it is a one-to-one chat
             try:
                 row = wa.resolve_chat(t)
-                if row["ZSESSIONTYPE"] == 0 and row["ZCONTACTJID"] and _chat_is_recipient(wa, row, rec):
-                    cands.append(row["ZCONTACTJID"])
+                if row["ZSESSIONTYPE"] == 0 and row["ZCONTACTJID"]:
+                    link = _chat_link(wa, row, rec)
+                    if link == "number":
+                        cands.append(row["ZCONTACTJID"])
+                    elif link == "name":
+                        by_name_only = row["ZCONTACTJID"]
             except WAError:
                 pass
     if rec.get("phone"):
         cands += wa.send_jids_for_phone(phone_digits(rec["phone"]))
+    if by_name_only:
+        # A name is not an identity: try that chat only after GoWA refused every jid of the number.
+        cands.append(by_name_only)
     cands = list(dict.fromkeys(c for c in cands if c))
     return {"kind": "person", "name": rec.get("name"), "phone": rec.get("phone"), "jid": cands[0],
             "candidates": cands}
 
 
-def _chat_is_recipient(wa: WhatsApp, row, rec: dict) -> bool:
-    """Whether the chat found by name is the contact's ("Xavi" can be the contact Xavi Maria while
-    the chat named "Xavi" is someone else): its jid is linked to the number or, for an @lid the
-    Mac cannot link, it carries exactly the contact's name."""
+def _chat_link(wa: WhatsApp, row, rec: dict) -> str | None:
+    """How the chat found by name belongs to the contact ("Xavi" can be the contact Xavi Maria
+    while the chat named "Xavi" is someone else): "number" when its jid is linked to the
+    contact's number, "name" for an @lid the Mac cannot link that carries exactly the contact's
+    name, None otherwise."""
     jid = row["ZCONTACTJID"]
     digits = phone_digits(rec.get("phone") or "")
     if not digits:
-        return False
-    variants = br_variants(digits)
+        return None
     if jid in wa.jids_for_phone(digits):
-        return True
+        return "number"
     known = wa.phone_for_jid(jid)
     if known:
-        return known in variants
+        return "number" if known in br_variants(digits) else None
     chat_name = row["ZPARTNERNAME"] or wa.contact_name(jid)
-    return bool(chat_name and rec.get("name") and normalize(chat_name) == normalize(rec["name"]))
+    same = chat_name and rec.get("name") and normalize(chat_name) == normalize(rec["name"])
+    return "name" if same else None
 
 
 _NOT_ON_WHATSAPP = ("no lid found", "not on whatsapp")

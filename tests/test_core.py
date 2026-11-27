@@ -373,3 +373,30 @@ def test_chat_state_does_not_reveal_hidden_chats(data_dir):
         assert w.chat_state([hidden]) is None
     with WhatsApp(include_hidden=True) as w:
         assert w.chat_state([hidden]) is not None
+
+
+def test_local_number_without_whatsapp_id_is_not_guessed(data_dir):
+    """(51) is Porto Alegre, but read as E.164 it is Peru: without "+" or a WhatsApp id, no phone."""
+    _add_contacts(data_dir, [(63, "Gaucho Local", "Gaucho", "(51) 98888-7777", None, None)])
+    with WhatsApp() as w:
+        assert not any(c["phone"] for c in w.find_contacts("Gaucho Local")["contacts"])
+        with pytest.raises(NotFoundError):
+            w.resolve_recipient("Gaucho Local")
+
+
+def test_device_suffix_jid_still_resolves(wa):
+    assert wa.resolve_recipient("5561911112222:3@s.whatsapp.net")["jid"] == ANA_JID
+
+
+def test_sent_message_in_a_hidden_chat_is_found_but_its_jid_hidden(data_dir):
+    """Skipping hidden chats would answer "nothing was sent" for a message that went out."""
+    c = sqlite3.connect(data_dir / "ChatStorage.sqlite")
+    c.execute("INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZMESSAGEDATE, ZTEXT, ZISFROMME, ZMESSAGETYPE, ZMESSAGESTATUS) "
+              "VALUES (4001, 4, 700000000, 'went out', 1, 0, 8)")
+    c.commit()
+    c.close()
+    with WhatsApp() as w:
+        found = w.find_sent_message(["99990000000001@lid"], "went out", 699999999)
+        assert found is not None and found["chat_matched"] is False and found["chat_jid"] is None
+    with WhatsApp(include_hidden=True) as w:
+        assert w.find_sent_message([], "went out", 699999999)["chat_jid"] == "5561900000001@s.whatsapp.net"

@@ -195,8 +195,9 @@ def chat_action(
         current = ui.find_item(bar.path, spec.already)
         if current is not None:
             result.update(done=True, already=True, clicked=None, note=f"The menu already shows {current.title!r}: nothing to do.")
-            result["state_after"] = wa.chat_state(jids)
-            result["verified"] = bool(spec.check and result["state_after"] and spec.check(result["state_after"]))
+            after = wa.chat_state(jids, with_hidden=True)
+            result["state_after"] = _shown(wa, jids, after)
+            result["verified"] = bool(spec.check and after and spec.check(after))
             return result
         titles = [m.title for m in ui.items(bar.path)]
         raise ActionFailed(f"Item for {action!r} not found in the {_en(MENU_CHAT)!r} menu.", menu_items=titles)
@@ -219,13 +220,14 @@ def chat_action(
     if spec.check is None:
         result.update(verified=False, reason="no_db_signal")
         return result
-    if before is None and wa.chat_state(jids) is None:
+    # Verify against hidden chats too; only the answer leaves their state out.
+    if wa.chat_state(jids, with_hidden=True) is None:
         result.update(verified=False, reason="chat_not_in_db")
         return result
     state: dict = {}
 
     def ok() -> bool:
-        st = wa.chat_state(jids)
+        st = wa.chat_state(jids, with_hidden=True)
         state["after"] = st
         return bool(st and spec.check(st))
 
@@ -244,7 +246,7 @@ def chat_action(
             verified = ui.wait_for(ok, CONFIRM_TIMEOUT)
         else:
             result["retry_skipped"] = "another app came to the front before the second click"
-    result["state_after"] = state.get("after")
+    result["state_after"] = _shown(wa, jids, state.get("after"))
     result["verified"] = verified
     if not verified:
         result["reason"] = "not_seen_in_db"
@@ -253,6 +255,11 @@ def chat_action(
             f"{int(CONFIRM_TIMEOUT)} s. Check WhatsApp before trying again."
         )
     return result
+
+
+def _shown(wa: WhatsApp, jids: list[str], state: dict | None) -> dict | None:
+    """The state to put in the answer: none for a chat the reads would hide."""
+    return state if state is not None and wa.chat_state(jids) is not None else None
 
 
 def _retry_target(ui: WhatsAppUI, spec: ActionSpec):
