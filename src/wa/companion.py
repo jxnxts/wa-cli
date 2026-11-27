@@ -34,7 +34,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import quote, urlencode
 
-from .core import MAX_TEXT_CHARS, WhatsApp, looks_like_phone, parse_when, phone_digits
+from .core import MAX_TEXT_CHARS, WhatsApp, br_variants, looks_like_phone, normalize, parse_when, phone_digits
 from .db import APPLE_EPOCH_OFFSET, ActionRefused, InvalidArgument, NotFoundError, WAError
 
 # ------------------------------------------------------------ constantes
@@ -212,6 +212,10 @@ def multipart_body(fields: dict, field_name: str, filename: str, content_type: s
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
+# GoWA is on 127.0.0.1: never send its requests (and the Basic auth) through HTTP_PROXY.
+_no_proxy_open = urlrequest.build_opener(urlrequest.ProxyHandler({})).open
+
+
 @dataclass
 class GowaClient:
     """Minimal client for the GoWA REST API (127.0.0.1 only)."""
@@ -219,7 +223,7 @@ class GowaClient:
     url: str
     secret: str | None
     timeout: float = 20.0
-    opener: Callable[..., Any] = field(default=urlrequest.urlopen, repr=False)
+    opener: Callable[..., Any] = field(default=_no_proxy_open, repr=False)
 
     def _headers(self, device: bool) -> dict[str, str]:
         h = {"Accept": "application/json"}
@@ -522,23 +526,16 @@ def resolve_target(wa: WhatsApp, to: str, allow_groups: bool = True) -> dict:
     if t.endswith("@g.us"):
         if not allow_groups:
             raise InvalidArgument("groups are not accepted here")
-        if not re.fullmatch(r"[\d-]+@g\.us", t):
-            raise InvalidArgument(f"invalid group jid: {t}")
-        name = None
-        try:
-            name = wa._chat_dict(wa.resolve_chat(t)).get("name")
-        except WAError:
-            pass
-        return {"kind": "group", "jid": t, "name": name, "candidates": [t]}
+        # Same rules as the app path: a well-formed jid of a known, visible group, never a community.
+        group = wa.resolve_recipient(t)
+        return {"kind": "group", "jid": t, "name": group.get("name"), "candidates": [t]}
     if t.endswith("@broadcast") or t.endswith("@newsletter"):
         raise InvalidArgument("broadcast lists, status and channels are not supported")
     cands: list[str] = []
     if "@" in t:
-        if not (t.endswith("@s.whatsapp.net") or t.endswith("@lid")):
-            raise InvalidArgument("invalid recipient: use a phone number, @s.whatsapp.net, @lid (person) or @g.us (group)")
         cands.append(t)  # exactly what was asked for
         try:
-            rec = wa.resolve_recipient(t)
+            rec = wa.resolve_recipient(t)  # also refuses malformed jids
         except NotFoundError:  # an @lid whose number this Mac does not know: still usable as is
             name = wa.contact_name(t)
             if not name:
@@ -552,7 +549,7 @@ def resolve_target(wa: WhatsApp, to: str, allow_groups: bool = True) -> dict:
         if not looks_like_phone(t):  # a name: the chat with that name, if it is a one-to-one chat
             try:
                 row = wa.resolve_chat(t)
-                if row["ZSESSIONTYPE"] == 0 and row["ZCONTACTJID"]:
+                if row["ZSESSIONTYPE"] == 0 and row["ZCONTACTJID"] and _chat_is_recipient(wa, row, rec):
                     cands.append(row["ZCONTACTJID"])
             except WAError:
                 pass
@@ -561,6 +558,24 @@ def resolve_target(wa: WhatsApp, to: str, allow_groups: bool = True) -> dict:
     cands = list(dict.fromkeys(c for c in cands if c))
     return {"kind": "person", "name": rec.get("name"), "phone": rec.get("phone"), "jid": cands[0],
             "candidates": cands}
+
+
+def _chat_is_recipient(wa: WhatsApp, row, rec: dict) -> bool:
+    """Whether the chat found by name is the contact's ("Xavi" can be the contact Xavi Maria while
+    the chat named "Xavi" is someone else): its jid is linked to the number or, for an @lid the
+    Mac cannot link, it carries exactly the contact's name."""
+    jid = row["ZCONTACTJID"]
+    digits = phone_digits(rec.get("phone") or "")
+    if not digits:
+        return False
+    variants = br_variants(digits)
+    if jid in wa.jids_for_phone(digits):
+        return True
+    known = wa.phone_for_jid(jid)
+    if known:
+        return known in variants
+    chat_name = row["ZPARTNERNAME"] or wa.contact_name(jid)
+    return bool(chat_name and rec.get("name") and normalize(chat_name) == normalize(rec["name"]))
 
 
 _NOT_ON_WHATSAPP = ("no lid found", "not on whatsapp")

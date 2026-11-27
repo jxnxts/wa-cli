@@ -845,3 +845,61 @@ def test_unknown_lid_without_phone_is_still_sent_as_given(data_dir, client, gowa
     with WhatsApp() as w:
         out = _send(w, client, tmp_path, lid)
     assert out["to"] == {"kind": "person", "name": "Someone", "phone": None, "jid": lid, "candidates": [lid]}
+
+
+# ------------------------------------------------------------ wrong recipient, groups, proxy
+
+
+def test_chat_found_by_name_must_belong_to_the_resolved_contact(data_dir, client, gowa, tmp_path):
+    """"Xavi" resolves to the contact Xavi Maria; the chat named "Xavi" is someone else's @lid."""
+    other = "88880000000077@lid"
+    c = sqlite3.connect(data_dir / "ContactsV2.sqlite")
+    c.execute("INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZFULLNAME, ZGIVENNAME, ZPHONENUMBER, ZWHATSAPPID, ZLID) "
+              "VALUES (70, 'Xavi Maria', 'Xavi', '+5561944445555', '5561944445555@s.whatsapp.net', NULL)")
+    c.commit()
+    c.close()
+    c = sqlite3.connect(data_dir / "ChatStorage.sqlite")
+    c.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZLASTMESSAGEDATE) "
+              "VALUES (70, ?, 'Xavi', 0, 700000000)", (other,))
+    c.commit()
+    c.close()
+    with WhatsApp() as w:
+        target = comp.resolve_target(w, "Xavi")
+        assert target["phone"] == "+5561944445555"
+        assert other not in target["candidates"] and target["jid"] == "5561944445555@s.whatsapp.net"
+        _send(w, client, tmp_path, "Xavi")
+    assert gowa.posts("/send/message")[0]["body"]["phone"] == "5561944445555@s.whatsapp.net"
+
+
+def test_companion_refuses_malformed_unknown_and_hidden_jids(wa):
+    for bad in ("---@g.us", "abc@lid", "12&x=y@s.whatsapp.net", "@s.whatsapp.net"):
+        with pytest.raises(InvalidArgument):
+            comp.resolve_target(wa, bad)
+    with pytest.raises(NotFoundError):
+        comp.resolve_target(wa, "120363999999999999@g.us")  # not among the known chats
+    assert comp.resolve_target(wa, GROUP_JID)["name"] == "Família"
+
+
+def test_companion_refuses_a_community(data_dir):
+    jid = "120363000000000077@g.us"
+    c = sqlite3.connect(data_dir / "ChatStorage.sqlite")
+    c.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZLASTMESSAGEDATE) "
+              "VALUES (71, ?, 'Bairro', 4, 700000000)", (jid,))
+    c.commit()
+    c.close()
+    with WhatsApp() as w:
+        with pytest.raises(InvalidArgument, match="community"):
+            comp.resolve_target(w, jid)
+
+
+def test_client_ignores_the_environment_proxy(client, monkeypatch):
+    """With HTTP_PROXY set, urlopen would send the request (and the Basic auth) to the proxy."""
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(var, "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    import urllib.request
+
+    # urlopen caches its opener (and the proxies read then) on first use: start from scratch.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    assert client.health() is True

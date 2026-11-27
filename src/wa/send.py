@@ -288,11 +288,6 @@ def _send_ui(
     jids = _confirm_jids(wa, recipient)
 
     saved_clipboard: str | None = None
-    if group:
-        saved_clipboard = _clipboard_get(runner)
-        if not _clipboard_set(runner, text):
-            raise SendFailed("Could not copy the text to the clipboard (pbcopy). Nothing was sent.")
-
     try:
         proc = runner(["open", open_url_for(recipient, text)], capture_output=True, text=True, timeout=15)
         if proc.returncode != 0:
@@ -313,6 +308,11 @@ def _send_ui(
             )
 
         if group:
+            # Copy only now, with WhatsApp in front: anything the user copied during the waits
+            # above would otherwise be pasted and sent instead.
+            saved_clipboard = _clipboard_get(runner)
+            if not _clipboard_set(runner, text):
+                raise SendFailed("Could not copy the text to the clipboard (pbcopy). Nothing was sent.")
             if osascript(runner, _PASTE_SCRIPT) != "pasted":
                 return _not_sent(
                     result, "whatsapp_not_frontmost",
@@ -332,7 +332,7 @@ def _send_ui(
         if out != "pressed":
             return _not_sent(result, "whatsapp_not_frontmost", "Another app came to the front before Return; nothing was sent.")
     finally:
-        if group and saved_clipboard is not None:
+        if saved_clipboard is not None:
             result["clipboard_restored"] = _clipboard_set(runner, saved_clipboard)
 
     # Confirm in the database (read-only).
