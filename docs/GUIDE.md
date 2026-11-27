@@ -113,7 +113,7 @@ wa lists                                # chat lists (from the companion when it
 
 - **Dates** (`--since`/`--until`) accept ISO (`2026-11-01`, `2026-11-01T10:00`, local time) or relative values (`30m`, `12h`, `7d`, `2w`). Output dates are ISO 8601 with the local offset.
 - **Limits** default to 20, with a maximum of 100 per page. For more results, pass the `next_cursor` from the answer in `--cursor`. Messages come newest first.
-- **`--chat` and `--to`** accept a phone number with country code (with or without the Brazilian ninth digit), a jid (`…@s.whatsapp.net`, `…@lid`, `…@g.us`) or a name. An ambiguous name returns `ambiguous` with the candidates.
+- **`--chat` and `--to`** accept a phone number with country code (with or without the Brazilian ninth digit, which is only tried for mobile numbers, never for a landline), a jid (`…@s.whatsapp.net`, `…@lid`, `…@g.us`, with digits before the `@`) or a name. A first name alone does not pick a person: "Ana" stays `ambiguous` when "Ana Clara" also matches, and so does a name that is exactly a chat without a known number while it is only part of a contact's name. A number in the address book without "+" and without a WhatsApp id is not used as the phone, since its country is unknown. An ambiguous name returns `ambiguous` with the candidates.
 - **Chats** have `jid`, `name`, `kind` (`direct`, `group`, `broadcast`, `community`, `channel`; `status` is left out by default), `unread`, `archived`, `last_message_at`, `phone` (one-to-one chats) and `pinned`.
 - **Messages** have `id`, `date`, `from_me`, `from` (`name` and `jid`; in groups the author comes from the address book, the group member or the profile name), `type` (`text`, `image`, `audio`, `video`, `document`, `link`, `sticker`… or `type_N`), `text` (`null` for most media; for a document, its title) and, for a message with a file, `media` (see [Media](#media)). Search results also carry `chat`.
 - Removed chats never show up. Hidden chats (`ZHIDDEN=1`) show up only with `--include-hidden`, which exists only on the CLI. MCP never shows hidden chats.
@@ -135,7 +135,7 @@ wa send --to "+1…" --text "…" --via desktop                                 
 
 The answer always names the path it used in `via` (`companion` or `desktop`). Text can be up to 4096 characters on the CLI and 2000 in MCP.
 
-Through the companion, a person is addressed by the jid WhatsApp knows, which is not always the number in the address book. A jid you pass (`…@lid` or `…@s.whatsapp.net`) is used as given. For a number or a name, `wa` uses the jid of the existing chat (often an `@lid`), then the contact's WhatsApp id (which can be an old Brazilian number without the ninth digit), then the number with and without the ninth digit. If GoWA answers that the recipient is not on WhatsApp (`no LID found`), `wa` tries the next one. `to.jid` and `confirmation.jid` in the answer show the jid used, `to.candidates` the order, and `to.jids_refused` the ones GoWA refused.
+Through the companion, a person is addressed by the jid WhatsApp knows, which is not always the number in the address book. A jid you pass (`…@lid` or `…@s.whatsapp.net`) is used as given. For a number or a name, `wa` uses the jid of the existing chat (often an `@lid`) when its jid is linked to the contact's number (an `@lid` the Mac cannot link that only carries exactly the contact's name is tried last, after every jid of the number), then the contact's WhatsApp id (which can be an old Brazilian number without the ninth digit), then the number with and without the ninth digit. If GoWA answers that the recipient is not on WhatsApp (`no LID found`), `wa` tries the next one. `to.jid` and `confirmation.jid` in the answer show the jid used, `to.candidates` the order, and `to.jids_refused` the ones GoWA refused.
 
 How a real send through the app UI (`--method ui`, the default) works:
 
@@ -158,7 +158,7 @@ Results:
 
 On the CLI, `--confirm` without a confirmed send exits with code 1.
 
-Recipients are **people** (a phone number, `@s.whatsapp.net`, or `@lid` with a known phone number) and **groups** by jid (`…@g.us`, which must be a chat in the database; find it with `wa chats --groups`). A group name alone does not resolve. `wa` returns `not_found` with the matching group jids as candidates. Communities, broadcast lists (`@broadcast`) and channels (`@newsletter`) are refused with `invalid_argument`. `--method shortcut` only sends to people. The group send through the app has only run against simulators.
+Recipients are **people** (a phone number, `@s.whatsapp.net`, or `@lid` with a known phone number) and **groups** by jid (`…@g.us`, which must be a chat in the database; find it with `wa chats --groups`). A group name alone does not resolve. `wa` returns `not_found` with the matching group jids as candidates. Communities, broadcast lists (`@broadcast`) and channels (`@newsletter`) are refused with `invalid_argument`, through the app and through the companion alike. `--method` does not go with `--file` (files always go through the companion) and is refused with `invalid_argument`. `--method shortcut` only sends to people. The group send through the app has only run against simulators.
 
 #### Shortcuts method (optional, `--method shortcut`)
 

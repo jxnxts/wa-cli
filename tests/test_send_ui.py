@@ -416,3 +416,24 @@ def test_osascript_app_timeout_message():
     with pytest.raises(SendFailed) as exc:
         send.osascript(hanging, 'tell application "WhatsApp" to activate')
     assert "WhatsApp did not answer" in exc.value.message and exc.value.message.endswith("Nothing was sent.")
+
+
+def test_ui_group_copies_the_text_only_with_whatsapp_in_front(wa, ui):
+    """Copying before the open and the waits left seconds in which whatever the user copied
+    would be pasted and sent to the group."""
+    clock, make = ui
+    r = make(chat_pk=3)
+    out = _send(wa, clock, r, to=GROUP_JID, text="hi group")
+    assert out["sent"] is True
+    open_i = next(i for i, c in enumerate(r.calls) if c[0] == "open")
+    copy_i = next(i for i, c in enumerate(r.calls) if c[0] == "pbcopy")
+    paste_i = next(i for i, c in enumerate(r.calls) if c[0] == "osascript" and 'keystroke "v"' in c[2])
+    last_front_i = max(i for i, c in enumerate(r.calls[:paste_i]) if c[0] == "osascript" and c[2] == send._FRONT_SCRIPT)
+    assert open_i < last_front_i < copy_i < paste_i
+
+
+def test_ui_group_never_touches_the_clipboard_when_whatsapp_stays_behind(wa, ui):
+    clock, make = ui
+    r = make(chat_pk=3, fronts=("Terminal",))
+    out = _send(wa, clock, r, to=GROUP_JID)
+    assert out["sent"] is False and r.clipboard_history == [] and "clipboard_restored" not in out

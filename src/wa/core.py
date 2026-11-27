@@ -135,13 +135,30 @@ def jid_user(jid: str | None) -> str | None:
     return jid.split("@", 1)[0].split(":", 1)[0]
 
 
+PERSON_JID = re.compile(r"\d+(:\d+)?@(s\.whatsapp\.net|lid)")  # ":3" is a device suffix
+GROUP_JID = re.compile(r"\d+(-\d+)?@g\.us")
+
+
+def _e164_digits(phone: str | None, wa_jid: str | None) -> str:
+    """Digits with the country code of an address book contact, or "" when unsure.
+
+    ZPHONENUMBER is what the user typed and is often local ("(61) 98888-7777"), so only
+    a number written with "+" counts; otherwise the WhatsApp id does."""
+    if phone and phone.strip().startswith("+"):
+        return phone_digits(phone)
+    if wa_jid and PERSON_JID.fullmatch(wa_jid) and wa_jid.endswith("@s.whatsapp.net"):
+        return jid_user(wa_jid)
+    return ""
+
+
 def br_variants(digits: str) -> list[str]:
     """Brazilian mobile numbers show up both with and without the ninth digit."""
     out = [digits]
     if digits.startswith("55"):
         if len(digits) == 13 and digits[4] == "9":
             out.append(digits[:4] + digits[5:])
-        elif len(digits) == 12:
+        elif len(digits) == 12 and digits[4] not in "2345":
+            # Only mobile numbers got the ninth digit; landlines start with 2-5 and never do.
             out.append(digits[:4] + "9" + digits[4:])
     return out
 
@@ -232,7 +249,9 @@ class WhatsApp:
                 name = r["ZFULLNAME"] or r["ZGIVENNAME"] or r["ZBUSINESSNAME"]
                 wa_jid = r["ZWHATSAPPID"]
                 lid = r["ZLID"]
-                digits = phone_digits(r["ZPHONENUMBER"]) or (jid_user(wa_jid) if wa_jid and wa_jid.endswith("@s.whatsapp.net") else "")
+                # Without "+" or a WhatsApp id the number is local and its country unknown: guessing
+                # turns an area code into a country code (51, Porto Alegre, is Peru). No phone then.
+                digits = _e164_digits(r["ZPHONENUMBER"], wa_jid)
                 contacts.append(
                     {
                         "name": name,
@@ -697,10 +716,13 @@ class WhatsApp:
                 if c["phone"] and any(v in phone_digits(c["phone"]) for v in variants)
             ]
         norm = normalize(ref).strip()
+        # A full name, business name or username that matches exactly wins on its own. A first
+        # name does not: "Ana" must stay ambiguous between "Ana Lúcia" and "Ana Clara".
         exact, partial = [], []
         for c in self._contacts:
-            fields = [normalize(c.get(k)) for k in ("name", "given_name", "business_name", "username")]
-            if norm in fields:
+            strong = [normalize(c.get(k)) for k in ("name", "business_name", "username")]
+            fields = strong + [normalize(c.get("given_name"))]
+            if norm in strong:
                 exact.append(c)
             elif any(norm in f for f in fields if f):
                 partial.append(c)
@@ -760,7 +782,7 @@ class WhatsApp:
         """
         base = (
             "SELECT m.Z_PK AS pk, m.ZMESSAGESTATUS AS status, m.ZMESSAGEDATE AS d, "
-            "s.ZCONTACTJID AS chatjid FROM ZWAMESSAGE m "
+            "s.ZCONTACTJID AS chatjid, s.ZHIDDEN AS hidden FROM ZWAMESSAGE m "
             "JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION "
             "WHERE m.ZISFROMME = 1 AND m.ZTEXT = ? AND m.ZMESSAGEDATE >= ?"
         )
@@ -774,6 +796,8 @@ class WhatsApp:
             )
         matched = bool(rows)
         if not rows:
+            # Any chat, hidden ones too: missing a sent message would say "nothing was sent" and
+            # invite a second send. A hidden chat's jid is left out of the answer below.
             rows = db.query(self.conn, f"{base} ORDER BY m.Z_PK DESC LIMIT 1", params)
         if not rows:
             return None
@@ -782,24 +806,29 @@ class WhatsApp:
             "message_id": r["pk"],
             "status": r["status"],
             "date": apple_to_iso(r["d"]),
-            "chat_jid": r["chatjid"],
+            "chat_jid": None if (r["hidden"] and not self.include_hidden and not matched) else r["chatjid"],
             "chat_matched": matched,
         }
 
     # ------------------------------------------------------------ chat state
 
-    def chat_state(self, jids: list[str]) -> dict | None:
-        """State (read-only) of the one-to-one chat with one of these JIDs."""
+    def chat_state(self, jids: list[str], with_hidden: bool | None = None) -> dict | None:
+        """State (read-only) of the one-to-one chat with one of these JIDs. Hidden chats follow
+        include_hidden, so an answer never shows a chat the reads would not; `with_hidden=True`
+        is only for checking an action internally."""
         jids = [j for j in dict.fromkeys(jids) if j]
         if not jids:
             return None
+        where, params = self._chat_filter("s", kinds=None)
+        if with_hidden or (with_hidden is None and self.include_hidden):
+            where, params = "COALESCE(s.ZREMOVED, 0) = 0", []
         rows = db.query(
             self.conn,
             f"SELECT s.Z_PK, s.ZCONTACTJID, s.ZARCHIVED, s.ZUNREADCOUNT, "
             f"(s.ZLASTMESSAGEDATE > {self._FUTURE}) AS pinned, s.ZPROPERTIES "
-            f"FROM ZWACHATSESSION s WHERE COALESCE(s.ZREMOVED, 0) = 0 "
+            f"FROM ZWACHATSESSION s WHERE {where} "
             f"AND s.ZCONTACTJID IN ({','.join('?' * len(jids))}) ORDER BY s.ZLASTMESSAGEDATE DESC",
-            jids,
+            [*params, *jids],
         )
         if not rows:
             return None
@@ -959,6 +988,8 @@ class WhatsApp:
         to = str(to).strip()
         if "@" in to:
             if to.endswith("@g.us"):
+                if not GROUP_JID.fullmatch(to):
+                    raise InvalidArgument(f"invalid group jid: {to}")
                 return self.resolve_group(to)
             if to.endswith("@broadcast"):
                 raise InvalidArgument(
@@ -970,9 +1001,10 @@ class WhatsApp:
                     "sending to channels (@newsletter) is not supported; "
                     "use a person (phone number, @s.whatsapp.net, @lid) or a group (@g.us)"
                 )
-            if not (to.endswith("@s.whatsapp.net") or to.endswith("@lid")):
+            if not PERSON_JID.fullmatch(to):
                 raise InvalidArgument(
-                    "invalid recipient: use a phone number, @s.whatsapp.net, @lid (person) or @g.us (group)"
+                    "invalid recipient: use a phone number, @s.whatsapp.net, @lid (person) or @g.us (group), "
+                    "with digits before the @"
                 )
             digits = self.phone_for_jid(to)
             if not digits:
@@ -989,7 +1021,18 @@ class WhatsApp:
                 raise InvalidArgument("the phone number needs the country and area code (e.g. +1 415 555 0123)")
             jid = f"{digits}@s.whatsapp.net"
             return {"name": self.contact_name(jid), "jid": jid, "phone": f"+{digits}", "kind": "person"}
-        found = [c for c in self.find_contacts(to, limit=MAX_LIMIT)["contacts"] if c.get("phone")]
+        matches = self.find_contacts(to, limit=MAX_LIMIT)["contacts"]
+        found = [c for c in matches if c.get("phone")]
+        unlinked = [c for c in matches if not c.get("phone") and normalize(c.get("name")) == normalize(to)]
+        if found and unlinked and not any(normalize(c["name"]) == normalize(to) for c in found):
+            # A chat called exactly this (an @lid with no known number) loses to a contact that only
+            # contains the name: that would be the wrong person, so ask instead.
+            raise AmbiguousError(
+                f"{to!r} is the exact name of a chat without a known number and part of other contacts' names; "
+                "use the phone number or the jid",
+                candidates=[{"name": c["name"], "phone": c.get("phone"), "jid": c.get("chat_jid") or c.get("jid")}
+                            for c in (unlinked + found)[:10]],
+            )
         if not found:
             groups = self.list_chats(kind="group", query=to, limit=10)["chats"]
             if groups:

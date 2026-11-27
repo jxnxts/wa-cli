@@ -311,3 +311,92 @@ def test_resolve_recipient_refuses_lists_and_channels(wa, to, word):
     with pytest.raises(InvalidArgument) as exc:
         wa.resolve_recipient(to)
     assert word in exc.value.message
+
+
+# ------------------------------------------------------------ recipients that went to the wrong person
+
+
+def _add_contacts(data_dir, rows, chats=()):
+    c = sqlite3.connect(data_dir / "ContactsV2.sqlite")
+    for pk, full, given, phone, wa_id, lid in rows:
+        c.execute(
+            "INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZFULLNAME, ZGIVENNAME, ZPHONENUMBER, ZWHATSAPPID, ZLID) "
+            "VALUES (?,?,?,?,?,?)", (pk, full, given, phone, wa_id, lid))
+    c.commit()
+    c.close()
+    c = sqlite3.connect(data_dir / "ChatStorage.sqlite")
+    for pk, jid, name in chats:
+        c.execute("INSERT INTO ZWACHATSESSION (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZLASTMESSAGEDATE) "
+                  "VALUES (?, ?, ?, 0, 700000000)", (pk, jid, name))
+    c.commit()
+    c.close()
+
+
+def test_br_variants_never_add_a_ninth_digit_to_a_landline():
+    from wa.core import br_variants
+
+    assert br_variants("551133334444") == ["551133334444"]  # São Paulo landline
+    assert br_variants("556181199067") == ["556181199067", "5561981199067"]  # old mobile
+    assert br_variants("5561981199067") == ["5561981199067", "556181199067"]
+
+
+def test_first_name_alone_does_not_hide_other_matches(data_dir):
+    _add_contacts(data_dir, [
+        (60, "Xavi Maria", "Xavi", "+5561944445555", "5561944445555@s.whatsapp.net", None),
+        (61, "Xavier Lopes", "Xavier", "+5561944446666", "5561944446666@s.whatsapp.net", None),
+    ])
+    with WhatsApp() as w:
+        with pytest.raises(AmbiguousError):
+            w.resolve_recipient("Xavi")
+        assert {c["name"] for c in w.find_contacts("Xavi")["contacts"]} >= {"Xavi Maria", "Xavier Lopes"}
+        assert w.resolve_recipient("Xavi Maria")["phone"] == "+5561944445555"  # full name still wins
+
+
+def test_local_address_book_number_does_not_become_a_country_code(data_dir):
+    lid = "55550000000001@lid"
+    _add_contacts(data_dir, [(62, "Local Number", "Local", "(61) 98888-7777", "5561988887777@s.whatsapp.net", lid)])
+    with WhatsApp() as w:
+        c = w.find_contacts("Local Number")["contacts"][0]
+        assert c["phone"] == "+5561988887777"
+        assert w.phone_for_jid(lid) == "5561988887777"
+
+
+def test_person_jid_needs_digits_before_the_at(wa):
+    for bad in ("12&x=y@s.whatsapp.net", "abc@lid", "@s.whatsapp.net"):
+        with pytest.raises(InvalidArgument):
+            wa.resolve_recipient(bad)
+
+
+def test_chat_state_does_not_reveal_hidden_chats(data_dir):
+    hidden = "5561900000001@s.whatsapp.net"
+    with WhatsApp() as w:
+        assert w.chat_state([hidden]) is None
+    with WhatsApp(include_hidden=True) as w:
+        assert w.chat_state([hidden]) is not None
+
+
+def test_local_number_without_whatsapp_id_is_not_guessed(data_dir):
+    """(51) is Porto Alegre, but read as E.164 it is Peru: without "+" or a WhatsApp id, no phone."""
+    _add_contacts(data_dir, [(63, "Gaucho Local", "Gaucho", "(51) 98888-7777", None, None)])
+    with WhatsApp() as w:
+        assert not any(c["phone"] for c in w.find_contacts("Gaucho Local")["contacts"])
+        with pytest.raises(NotFoundError):
+            w.resolve_recipient("Gaucho Local")
+
+
+def test_device_suffix_jid_still_resolves(wa):
+    assert wa.resolve_recipient("5561911112222:3@s.whatsapp.net")["jid"] == ANA_JID
+
+
+def test_sent_message_in_a_hidden_chat_is_found_but_its_jid_hidden(data_dir):
+    """Skipping hidden chats would answer "nothing was sent" for a message that went out."""
+    c = sqlite3.connect(data_dir / "ChatStorage.sqlite")
+    c.execute("INSERT INTO ZWAMESSAGE (Z_PK, ZCHATSESSION, ZMESSAGEDATE, ZTEXT, ZISFROMME, ZMESSAGETYPE, ZMESSAGESTATUS) "
+              "VALUES (4001, 4, 700000000, 'went out', 1, 0, 8)")
+    c.commit()
+    c.close()
+    with WhatsApp() as w:
+        found = w.find_sent_message(["99990000000001@lid"], "went out", 699999999)
+        assert found is not None and found["chat_matched"] is False and found["chat_jid"] is None
+    with WhatsApp(include_hidden=True) as w:
+        assert w.find_sent_message([], "went out", 699999999)["chat_jid"] == "5561900000001@s.whatsapp.net"

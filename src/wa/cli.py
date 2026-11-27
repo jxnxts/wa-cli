@@ -110,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--via", choices=comp.VIAS, default="auto",
                    help="auto (default): the companion if it is connected, otherwise the app UI; companion; desktop")
     p.add_argument("--reply-to", help="id of the message to quote (companion only)")
-    p.add_argument("--method", choices=METHODS, default=DEFAULT_METHOD,
+    p.add_argument("--method", choices=METHODS, default=None,
                    help="through the app UI (desktop): ui (default) opens the chat (a group through whatsapp://openchat/<jid>, "
                         "with the text pasted), presses Return with WhatsApp in front and checks the database; needs an "
                         "unlocked screen; shortcut: the 'WA Send' shortcut (people only); draft: only opens the chat")
@@ -319,6 +319,11 @@ def run(argv: list[str] | None = None) -> int:
             elif args.cmd == "send" and args.file:
                 if args.text:
                     raise InvalidArgument("with --file, put the text in --caption")
+                if args.method is not None:
+                    # A file always goes through the companion; --method (draft above all) would
+                    # be silently ignored and the file sent.
+                    raise InvalidArgument("--method does not apply to --file: files go through the companion. "
+                                          "Leave out --confirm to see the plan without sending.")
                 data = media_send.send_media(
                     wa, args.to, args.file, caption=args.caption, as_kind=args.as_kind, confirm=args.confirm,
                     via=args.via, reply_to=args.reply_to, allow_any_path=args.allow_any_path,
@@ -330,7 +335,7 @@ def run(argv: list[str] | None = None) -> int:
                 if args.text is None:
                     raise InvalidArgument("give --text or --file")
                 data = routing.send(
-                    wa, args.to, args.text, confirm=args.confirm, via=args.via, method=args.method,
+                    wa, args.to, args.text, confirm=args.confirm, via=args.via, method=args.method or DEFAULT_METHOD,
                     reply_to=args.reply_to, open_draft=(args.method == "draft"),
                     client_factory=_companion_factory, desktop_send=send_message,
                 )

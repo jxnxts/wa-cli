@@ -252,3 +252,16 @@ def test_mcp_stdio_initialize_and_list(data_dir):
     assert len(tools.tools) >= 10
     payload = json.loads(res.content[0].text)
     assert payload["count"] == 2
+
+
+@pytest.mark.parametrize("method", ["draft", "shortcut", "ui"])
+def test_cli_send_file_refuses_method(data_dir, capsys, monkeypatch, tmp_path, method):
+    """--method draft used to be ignored with --file and the file was sent."""
+    from wa import media_send
+
+    monkeypatch.setenv("WA_ALLOW_SEND", "1")
+    monkeypatch.setattr(media_send, "send_media", lambda *a, **k: pytest.fail("must not send"))
+    f = tmp_path / "x.txt"
+    f.write_text("x")
+    rc, out = _cli(capsys, "send", "--to", "bruno", "--file", str(f), "--method", method, "--confirm")
+    assert rc == 1 and out["error"] == "invalid_argument" and "--method" in out["message"]
